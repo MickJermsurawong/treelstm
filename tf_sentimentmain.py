@@ -34,6 +34,7 @@ class Config(object):
     nonroot_labels=True
 
     embeddings = None
+    ancestral=False
 
 def train2():
 
@@ -161,6 +162,7 @@ def train(restore=False):
     config.dropout = 1.0
     config.emb_lr = 0.1
     config.fine_grained = True
+    config.ancestral = True
 
 
     train_set, dev_set, test_set = data['train'], data['dev'], data['test']
@@ -230,8 +232,8 @@ def train(restore=False):
 
 
 def train_epoch(model,data,sess):
-
     loss=model.train(data,sess)
+
     return loss
 
 def evaluate(model,data,sess):

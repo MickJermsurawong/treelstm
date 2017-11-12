@@ -44,6 +44,7 @@ class BatchTree(object):
                 self.children[child_index].add_sample(-1 if sample_values is None else sample_values, -1 if label_value is None else label_value, len(self.samples_values) - 1)
             return self.children[child_index]
 
+        # Adds sample value (word value at the node) and label value of node
         def add_sample(self, sample_values, label_values, scatter_indice = None):
             self.samples_values.append(sample_values)
             self.labels_values.append(-1 if label_values is None else label_values)
@@ -53,7 +54,7 @@ class BatchTree(object):
                 self.scatter_indices.append(scatter_indice)
 
     def build_batch_tree_sample(self):
-        q = collections.deque([(self.root,0)])
+        q = collections.deque([(self.root,0)]) # 2-way queue
         batch_levels = dict()
         max_flow = len(self.root.samples_values)
         max_level = 0
@@ -110,7 +111,7 @@ class BatchTree(object):
         levels = range(max_level)
         levels.reverse()
         for l,i in zip(range(max_level),levels):
-            level_dict = batch_levels[i]
+            level_dict = batch_levels[i] # Start from leaves
             mask_level = np.concatenate(level_dict["mask"], axis=0)
             input_scatter_level = np.arange(len(mask_level))[mask_level]
             input_scatter = np.concatenate([input_scatter, input_scatter_level], axis=0)
@@ -213,11 +214,11 @@ def tree_to_matrice_test():
 
     #tree.root.add_sample(7, 1)
 
-    tree.root.add_sample(-1, 1)
-    tree.root.expand_or_add_child(1, 1, 0)
-    tree.root.expand_or_add_child(-1, 1, 1)
-    tree.root.children[1].expand_or_add_child(3, 0, 0)
-    tree.root.children[1].expand_or_add_child(3, 0, 1)
+    tree.root.add_sample(-1, 1) # Sample val = -1, label val = 1
+    tree.root.expand_or_add_child(1, 1, 0) # 0th child, sample val = 1, label val = 1
+    tree.root.expand_or_add_child(-1, 1, 1) # 1st child, sample val = -1, label val = 1
+    tree.root.children[1].expand_or_add_child(3, 0, 0) # 0th child, sample val = 3, label val = 0
+    tree.root.children[1].expand_or_add_child(3, 0, 1) # 1st child, sample val = 3, label val = 0
     #tree.root.children[1].expand_or_add_child(3, 0, 0)
     #tree.root.children[1].expand_or_add_child(3, 0, 1)
 

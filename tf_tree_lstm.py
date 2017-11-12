@@ -28,7 +28,10 @@ class tf_NarytreeLSTM(object):
 
         self.add_model_variables()
 
-        self.batch_loss = self.compute_loss(emb_leaves)
+        if self.config.ancestral:
+            self.batch_loss = self.compute_ancestral_loss(emb_leaves)
+        else:
+            self.batch_loss = self.compute_loss(emb_leaves)
 
         self.loss,self.total_loss=self.calc_batch_loss(self.batch_loss)
 
@@ -44,11 +47,11 @@ class tf_NarytreeLSTM(object):
             initializer = tf.random_uniform_initializer(-0.05,0.05)
 
         with tf.variable_scope("Embed",regularizer=None):
-            embedding=tf.Variable(initial_value = initializer, trainable=True, name = 'embedding', dtype='float32')
-            ix=tf.to_int32(tf.not_equal(self.input,-1))*self.input
-            emb_tree=tf.nn.embedding_lookup(embedding,ix)
+            embedding=tf.Variable(initial_value = initializer, trainable=True, name = 'embedding', dtype='float32') # dim = [word_vec_dim, emb_dim]
+            ix=tf.to_int32(tf.not_equal(self.input,-1))*self.input # Non -1 input
+            emb_tree=tf.nn.embedding_lookup(embedding,ix) # Rows of embedding related to batch
             emb_tree=emb_tree*(tf.expand_dims(
-                        tf.to_float(tf.not_equal(self.input,-1)),2))
+                        tf.to_float(tf.not_equal(self.input,-1)),2)) # Broadcasted over all emb_dim
 
             return emb_tree
 
@@ -60,10 +63,10 @@ class tf_NarytreeLSTM(object):
         self.treestr = tf.placeholder(tf.int32,[dim1,dim2,2],name='tree')
         self.labels = tf.placeholder(tf.int32,[dim1,dim2],name='labels')
         self.dropout = tf.placeholder(tf.float32,name='dropout')
-        self.n_inodes = tf.reduce_sum(tf.to_int32(tf.not_equal(self.treestr,-1)),[1,2])
-        self.n_inodes = self.n_inodes/2
+        self.n_inodes = tf.reduce_sum(tf.to_int32(tf.not_equal(self.treestr,-1)),[1,2]) # compare to constant value of -1
+        self.n_inodes = self.n_inodes/2 # Divide by 2 for the double counting of last dim of treestr
 
-        self.num_leaves = tf.reduce_sum(tf.to_int32(tf.not_equal(self.input,-1)),[1])
+        self.num_leaves = tf.reduce_sum(tf.to_int32(tf.not_equal(self.input,-1)),[1]) # compare to constant value of -1
         self.batch_len = tf.placeholder(tf.int32,name="batch_len")
 
     def calc_wt_init(self,fan_in=300):
@@ -71,6 +74,7 @@ class tf_NarytreeLSTM(object):
         return eps
 
     def add_model_variables(self):
+
 
         with tf.variable_scope("Composition",
                                 initializer=
@@ -101,12 +105,12 @@ class tf_NarytreeLSTM(object):
             b = tf.slice(cb,[0],[2*self.hidden_dim])
             def _recurseleaf(x):
 
-                concat_uo = tf.matmul(tf.expand_dims(x,0),cU) + b
+                concat_uo = tf.matmul(tf.expand_dims(x,0),cU) + b # Leaves do not have previous h terms
                 u,o = tf.split(axis=1,num_or_size_splits=2,value=concat_uo)
                 o=tf.nn.sigmoid(o)
                 u=tf.nn.tanh(u)
 
-                c = u#tf.squeeze(u)
+                c = u#tf.squeeze(u) # Leaves update c fully, no i
                 h = o * tf.nn.tanh(c)
 
 
@@ -114,7 +118,7 @@ class tf_NarytreeLSTM(object):
                 hc=tf.squeeze(hc)
                 return hc
 
-        hc = tf.map_fn(_recurseleaf,emb)
+        hc = tf.map_fn(_recurseleaf,emb) # Each element in emb is a leaf-pair, return a list of hc of those leaf-pairs
         return hc
 
 
@@ -123,18 +127,18 @@ class tf_NarytreeLSTM(object):
         prediction=[]
         for idx_batch in range(self.config.batch_size):
 
-            tree_states=self.compute_states(emb_batch,idx_batch)
+            tree_states,_=self.compute_states(emb_batch,idx_batch)
             logits = self.create_output(tree_states)
 
             labels1=tf.gather(self.labels,idx_batch)
-            labels2=tf.reduce_sum(tf.to_int32(tf.not_equal(labels1,-1)))
+            labels2=tf.reduce_sum(tf.to_int32(tf.not_equal(labels1,-1))) # Number of labelled nodes
             labels=tf.gather(labels1,tf.range(labels2))
             loss = self.calc_loss(logits,labels)
 
 
             pred = tf.nn.softmax(logits)
 
-            pred_root=tf.gather(pred,labels2-1)
+            pred_root=tf.gather(pred,labels2-1) # Root node at end of array
 
 
             prediction.append(pred_root)
@@ -145,23 +149,87 @@ class tf_NarytreeLSTM(object):
 
         return batch_loss
 
+    def compute_ancestral_loss(self,emb_batch,curr_batch_size=None):
+        outloss=[]
+        prediction=[]
+        for idx_batch in range(self.config.batch_size):
+            # Obtain tree structure
+            # nb of leaves in this sample
+            num_leaves = tf.squeeze(tf.gather(self.num_leaves, idx_batch))
+            n_inodes = tf.gather(self.n_inodes, idx_batch)
+            treestr = tf.gather(tf.gather(self.treestr, idx_batch), tf.range(n_inodes))
+
+            tree_states,parent_info=self.compute_states(emb_batch,idx_batch)
+            logits=self.create_output(tree_states)
+
+            labels1 = tf.gather(self.labels, idx_batch)
+            labels2 = tf.reduce_sum(tf.to_int32(tf.not_equal(labels1, -1)))  # Number of labelled nodes
+            labels = tf.gather(labels1, tf.range(labels2))
+
+            l1 = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits, labels=labels) # Loss of labelled nodes
+
+            pred = tf.nn.softmax(logits)
+            pred_root = tf.gather(pred, labels2 - 1)  # Root node at end of array
+
+            pathloss = tf.Variable([])
+            idx_var = tf.constant(0)
+
+            # Get the discounted loss over internal node's ancestral path
+            def _path_loss(pathloss, idx_var):
+                cur_idx = idx_var + num_leaves # Index of current internal node
+                cur_loss = tf.constant(0.0) # Discounted loss over current internal node's ancestral path
+                cur_level = tf.constant(0)
+
+                def _iterate_ancestors(cur_loss, cur_level, cur_idx):
+                    cur_loss = cur_loss + tf.gather(l1, cur_idx) # Add discount factor later
+
+                    cur_idx = tf.gather(parent_info, cur_idx) # Recursively called function on parent of current node
+                    cur_level = tf.add(cur_level, 1) # Depth of the path, to calculate discount factor
+
+                    return cur_loss, cur_level, cur_idx
+                inner_loop_cond = lambda cur_loss, cur_level, cur_idx: tf.less(cur_idx, labels2-1) # Problem here causing forever loop
+                inner_loop_vars = [cur_loss, cur_level, cur_idx]
+                cur_loss, cur_level, cur_idx = tf.while_loop(inner_loop_cond, _iterate_ancestors, inner_loop_vars, parallel_iterations=10)
+
+                cur_loss = cur_loss + tf.gather(l1, labels2-1) # Include loss from root node
+                pathloss = tf.concat([pathloss, [cur_loss]], axis=0)
+
+                idx_var = tf.add(idx_var, 1)
+
+                return pathloss, idx_var
+
+            loop_cond = lambda pathloss,idx_var: tf.less(idx_var, n_inodes)
+            loop_vars = [pathloss,idx_var]
+            pathloss, idx_var = tf.while_loop(loop_cond, _path_loss, loop_vars, shape_invariants=[tf.TensorShape([None]), idx_var.get_shape()], parallel_iterations=10)
+
+            pathloss = tf.reduce_sum(pathloss) # Sum all losses from all ancestral paths
+
+            prediction.append(pred_root)
+            outloss.append(pathloss)
+
+        batch_loss=tf.stack(outloss)
+        self.pred = tf.stack(prediction)
+
+        return batch_loss
 
     def compute_states(self,emb,idx_batch=0):
 
         # nb of leaves in this sample
-        num_leaves = tf.squeeze(tf.gather(self.num_leaves,idx_batch))
+        num_leaves = tf.squeeze(tf.gather(self.num_leaves,idx_batch)) # Number of leaves in this tree
         #num_leaves=tf.Print(num_leaves,[num_leaves])
-        n_inodes = tf.gather(self.n_inodes,idx_batch)
+        n_inodes = tf.gather(self.n_inodes,idx_batch) # Number of internal nodes in this tree?
         #embx=tf.gather(emb,tf.range(num_leaves))
-        embx=tf.gather(tf.gather(emb,idx_batch),tf.range(num_leaves))
+        embx=tf.gather(tf.gather(emb,idx_batch),tf.range(num_leaves)) # First num leaf indices are leaves?
         #treestr=self.treestr#tf.gather(self.treestr,tf.range(self.n_inodes))
-        treestr=tf.gather(tf.gather(self.treestr,idx_batch),tf.range(n_inodes))
-        leaf_hc = self.process_leafs(embx)
+        treestr=tf.gather(tf.gather(self.treestr,idx_batch),tf.range(n_inodes)) # First num inodes indices are internal nodes?
+        leaf_hc = self.process_leafs(embx) # List of hc from leaves
         leaf_h,leaf_c=tf.split(axis=1,num_or_size_splits=2,value=leaf_hc)
 
+        # Gets the parent information of internal nodes
+        parent_info = tf.constant(0, shape=[self.config.maxnodesize])
 
-        node_h=tf.identity(leaf_h)
-        node_c=tf.identity(leaf_c)
+        node_h=tf.identity(leaf_h) # First num_leaves indices are from leaves
+        node_c=tf.identity(leaf_c) # First num_leaves indices are from leaves
 
         idx_var=tf.constant(0) #tf.Variable(0,trainable=False)
 
@@ -171,8 +239,11 @@ class tf_NarytreeLSTM(object):
             cb = tf.get_variable("cb",[4*self.hidden_dim])
             bu,bo,bi,bf=tf.split(axis=0,num_or_size_splits=4,value=cb)
 
-            def _recurrence(node_h,node_c,idx_var):
-                node_info=tf.gather(treestr,idx_var)
+            def _recurrence(node_h,node_c,parent_info,idx_var):
+                node_info=tf.gather(treestr,idx_var) # Index of children nodes
+                node_info1, node_info2 = tf.split(axis=0,num_or_size_splits=2,value=node_info) # Order error?
+
+                parent_info = parent_info + tf.sparse_to_dense(sparse_indices=node_info1, output_shape=[self.config.maxnodesize], sparse_values=idx_var) + tf.sparse_to_dense(sparse_indices=node_info2, output_shape=[self.config.maxnodesize], sparse_values=idx_var)
 
                 child_h=tf.gather(node_h,node_info)
                 child_c=tf.gather(node_c,node_info)
@@ -197,14 +268,14 @@ class tf_NarytreeLSTM(object):
 
                 idx_var=tf.add(idx_var,1)
 
-                return node_h,node_c,idx_var
-            loop_cond = lambda a1,b1,idx_var: tf.less(idx_var,n_inodes)
+                return node_h,node_c,parent_info,idx_var
+            loop_cond = lambda a1,b1,c1,idx_var: tf.less(idx_var,n_inodes) # Iterate over all internal nodes?
 
-            loop_vars=[node_h,node_c,idx_var]
-            node_h,node_c,idx_var=tf.while_loop(loop_cond, _recurrence,
+            loop_vars=[node_h,node_c,parent_info,idx_var]
+            node_h,node_c,parent_info,idx_var=tf.while_loop(loop_cond, _recurrence,
                                                 loop_vars,parallel_iterations=10)
 
-            return node_h
+            return node_h,parent_info
 
 
     def create_output(self,tree_states):

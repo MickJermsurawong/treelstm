@@ -231,9 +231,9 @@ def build_batch_trees(trees, mini_batch_size):
     def expand_batch_with_sample(batch_node, sample_node):
         if batch_node.parent is None: # root
             batch_node.add_sample(-1 if sample_node.word is None else sample_node.word, tree.label)
-        for child in zip(range(len(sample_node.children)),sample_node.children):
+        for child in zip(range(len(sample_node.children)),sample_node.children): # iterate over direct children, [(0, child0), (1, child1), ...]
             batch_node.expand_or_add_child(child[1].word, child[1].label, child[0])
-        for children in zip(batch_node.children, sample_node.children):
+        for children in zip(batch_node.children, sample_node.children): # Recursive function call
             expand_batch_with_sample(children[0], children[1])
     batches = []
     while(len(trees)>0):

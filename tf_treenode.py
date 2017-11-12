@@ -61,6 +61,7 @@ class tNode(object):
             self.num_leaves=self.get_left().num_leaves+self.get_right().num_leaves
         else:
             self.num_leaves=1
+        print self.idx, self.num_leaves, 'asa'
 
     @staticmethod
     def postOrder(root,func=None,args=None):
@@ -143,20 +144,24 @@ def test_tNode():
     for i in range(7):
         nodes[i]=tNode(i)
         if i < 4:nodes[i].word=i+10
-    nodes[0].parent = nodes[1].parent = nodes[4]
-    nodes[2].parent = nodes[3].parent = nodes[5]
-    nodes[5].parent = nodes[6].parent = nodes[6]
+    nodes[0].parent = nodes[1].parent = nodes[4] # 4 is parent of 0 & 1
+    nodes[2].parent = nodes[3].parent = nodes[5] # 5 is parent of 2 & 3
+    nodes[4].parent = nodes[5].parent = nodes[6] # 6 is parent of 4 & 5, we get a height 3, 3 layer binary tree
     nodes[6].add_child(nodes[4])
     nodes[6].add_child(nodes[5])
     nodes[4].add_children([nodes[0],nodes[1]])
     nodes[5].add_children([nodes[2],nodes[3]])
     root=nodes[6]
     postOrder=root.postOrder
+    print "Getting height of nodes with postorder traversal:"
     postOrder(root,tNode.get_height,None)
+    print "Getting number of leaves with postorder traversal:"
     postOrder(root,tNode.get_numleaves,None)
+    print "Getting span of nodes with postorder traversal:"
     postOrder(root,root.get_spans,None)
-    print root.height,root.num_leaves
-    for n in nodes.itervalues():print n.span
+    print "Root height:",root.height
+    print "Root num leaves:",root.num_leaves
+    for n in nodes.itervalues():print n.idx,n.span
 
 if __name__=='__main__':
     test_tNode()
