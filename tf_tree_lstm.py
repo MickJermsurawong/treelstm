@@ -187,11 +187,11 @@ class tf_NarytreeLSTM(object):
                     cur_level = tf.add(cur_level, 1) # Depth of the path, to calculate discount factor
 
                     return cur_loss, cur_level, cur_idx
-                inner_loop_cond = lambda cur_loss, cur_level, cur_idx: tf.less(cur_idx, labels2-1) # Problem here causing forever loop
+                inner_loop_cond = lambda cur_loss, cur_level, cur_idx: tf.not_equal(cur_idx, tf.constant(0)) # Problem here causing forever loop
                 inner_loop_vars = [cur_loss, cur_level, cur_idx]
                 cur_loss, cur_level, cur_idx = tf.while_loop(inner_loop_cond, _iterate_ancestors, inner_loop_vars, parallel_iterations=10)
 
-                cur_loss = cur_loss + tf.gather(l1, labels2-1) # Include loss from root node
+                #cur_loss = cur_loss + tf.gather(l1, labels2-1) # Include loss from root node
                 pathloss = tf.concat([pathloss, [cur_loss]], axis=0)
 
                 idx_var = tf.add(idx_var, 1)
@@ -243,7 +243,7 @@ class tf_NarytreeLSTM(object):
                 node_info=tf.gather(treestr,idx_var) # Index of children nodes
                 node_info1, node_info2 = tf.split(axis=0,num_or_size_splits=2,value=node_info) # Order error?
 
-                parent_info = parent_info + tf.sparse_to_dense(sparse_indices=node_info1, output_shape=[self.config.maxnodesize], sparse_values=idx_var) + tf.sparse_to_dense(sparse_indices=node_info2, output_shape=[self.config.maxnodesize], sparse_values=idx_var)
+                parent_info = parent_info + tf.sparse_to_dense(sparse_indices=node_info1, output_shape=[self.config.maxnodesize], sparse_values=idx_var+num_leaves) + tf.sparse_to_dense(sparse_indices=node_info2, output_shape=[self.config.maxnodesize], sparse_values=idx_var+num_leaves)
 
                 child_h=tf.gather(node_h,node_info)
                 child_c=tf.gather(node_c,node_info)
