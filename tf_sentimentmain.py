@@ -4,6 +4,7 @@ import sys
 import numpy as np
 import tensorflow as tf
 import random
+import matplotlib.pyplot as plt
 
 import tf_tree_lstm
 import nary_tree_lstm
@@ -35,6 +36,8 @@ class Config(object):
 
     embeddings = None
     ancestral=False
+
+    plot=False
 
 def train2():
 
@@ -155,14 +158,15 @@ def train(restore=False):
     config=Config()
     config.batch_size = 5
     config.lr = 0.05
+    config.fine_grained = True
     data,vocab = utils.load_sentiment_treebank(DIR,GLOVE_DIR,config.fine_grained)
     config.embeddings = vocab.embed_matrix
     config.early_stopping = 2
     config.reg = 0.0001
     config.dropout = 1.0
     config.emb_lr = 0.1
-    config.fine_grained = True
-    config.ancestral = True
+    config.ancestral = False
+    config.plot = True
 
 
     train_set, dev_set, test_set = data['train'], data['dev'], data['test']
@@ -202,6 +206,11 @@ def train(restore=False):
         best_valid_epoch=0
         dev_score=0.0
         test_score=0.0
+
+        dev_score_array = []
+        test_score_array = []
+        loss_array = []
+
         with tf.Session() as sess:
 
             sess.run(init)
@@ -213,6 +222,7 @@ def train(restore=False):
                 print 'epoch', epoch
                 avg_loss=0.0
                 avg_loss = train_epoch(model, train_set,sess)
+                loss_array.append(avg_loss)
                 print 'avg loss', avg_loss
 
                 print "Training time per epoch is {0}".format(
@@ -220,6 +230,7 @@ def train(restore=False):
 
 
                 dev_score=evaluate(model,dev_set,sess)
+                dev_score_array.append(dev_score)
                 print 'dev-score', dev_score
 
                 if dev_score >= best_valid_score:
@@ -227,9 +238,32 @@ def train(restore=False):
                     best_valid_epoch=epoch
                     #saver.save(sess,'./ckpt/tree_rnn_weights')
                     test_score = evaluate(model, test_set, sess)
+                    test_score_array.append(test_score)
                     print 'test score :', test_score, 'updated', epoch - best_valid_epoch, 'epochs ago with validation score', best_valid_score
+                else:
+                    test_score = evaluate(model, test_set, sess)
+                    test_score_array.append(test_score)
 
+                if config.plot:
+                    plt.subplot(1,3,1)
+                    plt.plot(range(epoch+1), loss_array)
+                    plt.ylabel("Average Loss")
+                    plt.xlabel("Epochs")
 
+                    plt.subplot(1, 3, 2)
+                    plt.plot(range(epoch+1), dev_score_array)
+                    plt.ylabel("Dev Score")
+                    plt.xlabel("Epochs")
+
+                    plt.subplot(1, 3, 3)
+                    plt.plot(range(epoch+1), test_score_array)
+                    plt.ylabel("Test Score")
+                    plt.xlabel("Epochs")
+
+                    if config.ancestral:
+                        plt.savefig("Ancestral-Non-Optimized.png")
+                    else:
+                        plt.savefig("Non-Optimized.png")
 
 def train_epoch(model,data,sess):
     loss=model.train(data,sess)
