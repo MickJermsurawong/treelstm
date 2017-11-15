@@ -30,6 +30,7 @@ Requirements :
 
 - Tensorflow 1.0.1
 - Python 2.7
+- Matplotlib
 
 
 
