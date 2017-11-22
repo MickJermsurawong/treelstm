@@ -171,7 +171,7 @@ class tf_NarytreeLSTM(object):
             pred = tf.nn.softmax(logits)
             pred_root = tf.gather(pred, labels2 - 1)  # Root node at end of array
 
-            pathloss = tf.Variable([])
+            pathloss = tf.Variable([], trainable=False)
             idx_var = tf.constant(0)
 
             # Get the discounted loss over internal node's ancestral path
@@ -302,7 +302,8 @@ class tf_NarytreeLSTM(object):
         reg_losses = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)
         regpart=tf.add_n(reg_losses)
         loss=tf.reduce_mean(batch_loss)
-        total_loss=loss+0.5*regpart
+        #total_loss=loss+0.5*regpart
+        total_loss=loss+regpart
         return loss,total_loss
 
     def add_training_op_old(self):
