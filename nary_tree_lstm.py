@@ -118,6 +118,101 @@ class NarytreeLSTM(object):
                 outputs, _ = tf.nn.dynamic_rnn(cell, sen_embedding, lengths, dtype=tf.float32)
                 return outputs, outputs
 
+
+    def unflatten_loss(self, loss):
+
+        def _recurrence(flat_loss, output_array, idx_var):
+
+            prev_idx_var_dim1 = tf.expand_dims(idx_var - 1, 0)
+
+            prev_level_indice_begin, prev_level_indice_end = tf.split(
+                tf.slice(self.out_indices, prev_idx_var_dim1, [2]), 2)
+
+            current_level_loss = tf.slice(flat_loss, prev_level_indice_begin, prev_level_indice_end - prev_level_indice_begin)
+
+            output_array = output_array.write(idx_var - 1, current_level_loss)
+            idx_var = idx_var - 1
+            return flat_loss, output_array, idx_var
+
+        loss_array = tf.TensorArray(tf.float32, size=self.tree_height, clear_after_read=False)
+        loop_condition = lambda x, y, idx: tf.less(0, idx)
+        starting_idx_var = self.tree_height
+        loop_var = [loss, loss_array, starting_idx_var]
+        _, final_array_output, _ = tf.while_loop(loop_condition, _recurrence, loop_var, parallel_iterations=1)
+        return final_array_output
+
+
+    def get_ancestral_loss(self, loss_array):
+
+        def duplicate_element_array(input_t, times):
+            """
+            Eg. input: [8,9], times: 2, output: [8, 8, 9, 9]
+            """
+            return tf.reshape(tf.stack([input_t] * times, axis=1), [-1])
+
+        loss_array_output = tf.TensorArray(tf.float32, size=self.tree_height, clear_after_read=False)
+
+        root_loss = loss_array.read(self.tree_height - 1)
+        loss_array_output = loss_array_output.write(self.tree_height-1, root_loss)
+
+        # loss_array = loss_array.unstack(loss)
+
+        with tf.variable_scope("topdown", reuse=True):
+
+            # nodes_h = tf.TensorArray(tf.float32, size = self.tree_height, clear_after_read=False)
+
+            const0f = tf.constant([0], dtype=tf.float32)
+            idx_var = tf.identity(self.tree_height - 1)
+
+            def _recurrence(loss_array, loss_array_inher, idx_var):
+                prev_idx_var_dim1 = tf.expand_dims(idx_var-1, 0)
+
+                def inherit_loss():
+
+                    # compute scatter ind of child
+                    scatter_indice_begin, scatter_indice_size, child_scatters = self._compute_indices(prev_idx_var_dim1)
+                    scatters_in = tf.slice(self.scatter_in, scatter_indice_begin, scatter_indice_size)
+                    scatters_in = tf.reshape(scatters_in, tf.concat([scatter_indice_size, [-1]], 0))
+
+                    current_l = loss_array_inher.read(idx_var)
+                    gathered_loss = tf.gather_nd(current_l, scatters_in, name=None)
+
+                    inherited_loss = duplicate_element_array(gathered_loss, self.config.degree)
+
+                    inherited_loss_batched_format = tf.gather_nd(inherited_loss, child_scatters)
+                    return inherited_loss_batched_format
+
+                inherited_loss = tf.cond(tf.less(0, idx_var),
+                             lambda: inherit_loss(),
+                             lambda: const0f
+                             )
+
+                child_loss = loss_array.read(idx_var - 1)
+                child_loss += inherited_loss
+
+                # loss_array = loss_array.write(idx_var - 1, child_loss)
+                loss_array_inher = loss_array_inher.write(idx_var - 1, child_loss)
+
+                idx_var = tf.add(idx_var, - 1)
+
+                return loss_array, loss_array_inher, idx_var
+
+            loop_cond = lambda x, y, id: tf.less(0, id)
+            loop_vars = [loss_array, loss_array_output, idx_var]
+            original_loss, ancestral_loss, idx_var = tf.while_loop(loop_cond, _recurrence, loop_vars, parallel_iterations=1)
+            return ancestral_loss
+
+    def _compute_indices(self, prev_idx_var_dim1):
+        prev_level_indice_begin, prev_level_indice_end = tf.split(
+            tf.slice(self.out_indices, prev_idx_var_dim1, [2]), 2)
+        prev_level_indice_size = prev_level_indice_end - prev_level_indice_begin
+        scatter_indice_begin, scatter_indice_end = tf.split(
+            tf.slice(self.scatter_in_indices, prev_idx_var_dim1, [2]), 2)
+        scatter_indice_size = scatter_indice_end - scatter_indice_begin
+        child_scatters = tf.slice(self.child_scatter_indices, prev_level_indice_begin, prev_level_indice_size)
+        child_scatters = tf.reshape(child_scatters, tf.concat([prev_level_indice_size, [-1]], 0))
+        return scatter_indice_begin, scatter_indice_size, child_scatters
+
     def get_outputs(self):
 
         with tf.variable_scope("Node", reuse=True):
@@ -163,19 +258,8 @@ class NarytreeLSTM(object):
                 u_scatter_shape = tf.concat([flow, [self.config.hidden_dim * (3 + self.config.degree)]], axis=0)
                 c_scatter_shape = tf.concat([flow, [self.config.hidden_dim * self.config.degree]],axis=0)
 
-                def compute_indices():
-                    prev_level_indice_begin, prev_level_indice_end = tf.split(
-                        tf.slice(self.out_indices, prev_idx_var_dim1, [2]), 2)
-                    prev_level_indice_size = prev_level_indice_end - prev_level_indice_begin
-                    scatter_indice_begin, scatter_indice_end = tf.split(
-                        tf.slice(self.scatter_in_indices, prev_idx_var_dim1, [2]), 2)
-                    scatter_indice_size = scatter_indice_end - scatter_indice_begin
-                    child_scatters = tf.slice(self.child_scatter_indices, prev_level_indice_begin, prev_level_indice_size)
-                    child_scatters = tf.reshape(child_scatters, tf.concat([prev_level_indice_size, [-1]], 0))
-                    return scatter_indice_begin, scatter_indice_size, child_scatters
-
                 def hs_compute():
-                    scatter_indice_begin, scatter_indice_size, child_scatters = compute_indices()
+                    scatter_indice_begin, scatter_indice_size, child_scatters = self._compute_indices(prev_idx_var_dim1)
 
                     h = nodes_h.read(idx_var - 1)
                     hs = tf.scatter_nd(child_scatters,h,tf.shape(h), name=None)
@@ -188,7 +272,7 @@ class NarytreeLSTM(object):
                     return out
 
                 def cs_compute():
-                    scatter_indice_begin, scatter_indice_size, child_scatters = compute_indices()
+                    scatter_indice_begin, scatter_indice_size, child_scatters = self._compute_indices(prev_idx_var_dim1)
 
                     c = nodes_c.read(idx_var - 1)
                     cs = tf.scatter_nd(child_scatters, c, tf.shape(c), name=None)
@@ -231,7 +315,7 @@ class NarytreeLSTM(object):
 
                 def compute_attn_ctx(flat_src_l, flat_src_r):
 
-                    scatter_indice_begin, scatter_indice_size, child_scatters = compute_indices()
+                    scatter_indice_begin, scatter_indice_size, child_scatters = self._compute_indices(prev_idx_var_dim1)
 
                     child_hs_in_batch = nodes_h.read(idx_var - 1)
                     children_in_pairs = tf.scatter_nd(child_scatters, child_hs_in_batch, tf.shape(child_hs_in_batch),
@@ -593,11 +677,18 @@ class SoftMaxNarytreeLSTM(object):
     def get_loss(self):
         reg_losses = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)
         regpart = tf.add_n(reg_losses)
-        #regpart = tf.Print(regpart, [regpart])
         h = self.tree_lstm.get_output_unscattered().concat()
         out = tf.matmul(h, self.W) + self.b
+
         loss = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=self.labels, logits=out)
+
+        if self.config.ancestral:
+            loss_array = self.tree_lstm.unflatten_loss(loss)
+            loss = self.tree_lstm.get_ancestral_loss(loss_array).concat()
+
         return tf.reduce_sum(tf.divide(loss, tf.to_float(self.tree_lstm.batch_size))) + regpart
+
+
 
     def train(self, batch_tree, batch_labels, session):
 
@@ -728,7 +819,7 @@ def test_softmax_model():
     batch_sample = BatchTreeSample(tree)
 
     all_sen = np.array([[0, 0, 1, 1], [0, 0, 1, 1], [0, 0, 0, 0]])
-    lens = [2, 2, 4]
+    lens = [2, 3, 4]
     batch_sample.add_batch_sentences(all_sen, lens)
 
     observables, flows, mask, scatter_out, scatter_in, scatter_in_indices, labels, observables_indices, out_indices, childs_transpose_scatter, nodes_count, nodes_count_per_indice, tree_idx = tree.build_batch_tree_sample()

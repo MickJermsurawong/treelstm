@@ -245,7 +245,9 @@ def train2(config):
     print best_test_score_array
     print("----End experiment {}".format(exp_name))
 
+
 def experiment_name(config):
+
     return "atn-{}_mtching-{}_spn-{}_{}".format(
         config.attn_place,
         config.matching_scheme,
@@ -387,6 +389,7 @@ if __name__ == '__main__':
     parser.add_argument('--span', type=str, default='PARENT')
     parser.add_argument('--matching', type=str, default='DOT_PROD')
     parser.add_argument('--attn', type=str, default='ROOT')
+    parser.add_argument('--ancs', type=bool, default=False)
     args = parser.parse_args()
 
     config = Config()
@@ -401,5 +404,6 @@ if __name__ == '__main__':
     config.span_scheme = args.span
     config.matching_scheme = args.matching
     config.attn_place = args.attn
+    config.ancestral = args.ancs
 
     train2(config)
