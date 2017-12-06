@@ -340,14 +340,14 @@ def evaluate(model,data,sess):
     return acc
 
 if __name__ == '__main__':
-    if len(sys.argv) > 1:
-        if(sys.argv[1] == "-optimized"):
-            print "running optimized version"
-            train2()
-        else:
-            print "running not optimized version"
-            train()
-    else:
-        print "running not optimized version, run with option -optimized for the optimized one"
-        train()
+    # if len(sys.argv) > 1:
+    #     if(sys.argv[1] == "-optimized"):
+    #         print "running optimized version"
+    train2()
+    #     else:
+    #         print "running not optimized version"
+    #         train()
+    # else:
+    #     print "running not optimized version, run with option -optimized for the optimized one"
+    #     train()
 

@@ -18,6 +18,15 @@ class BatchTreeSample(object):
         self.nodes_count = nodes_count
         self.nodes_count_per_indice = nodes_count_per_indice
 
+        # sentences info
+        self.sentences = None
+        self.sentence_lengths = None
+
+    def add_batch_sentences(self, sentences, lengths):
+        self.sentences = sentences
+        self.sentence_lengths = lengths
+
+
 class BatchTree(object):
 
     def set_root(self, root_node):

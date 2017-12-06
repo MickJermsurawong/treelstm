@@ -52,6 +52,9 @@ class NarytreeLSTM(object):
             self.input_embed = tf.nn.embedding_lookup(self.embedding, self.observables)
             self.nodes_count_per_indice = tf.placeholder(tf.float32, shape=[None])
 
+            self.sentences = tf.placeholder(tf.int32, shape=[None, None])
+            self.lengths = tf.placeholder(tf.int32, shape=[None])
+
             self.training_variables = [self.U, self.W, self.b, self.bf]
             if config.trainable_embeddings:
                 self.training_variables.append( self.embedding)
@@ -74,7 +77,9 @@ class NarytreeLSTM(object):
         self.child_scatter_indices: batch_sample.child_scatter_indices,
         self.nodes_count: batch_sample.nodes_count,
         self.dropout : dropout,
-        self.nodes_count_per_indice : batch_sample.nodes_count_per_indice
+        self.nodes_count_per_indice : batch_sample.nodes_count_per_indice,
+        self.sentences : batch_sample.sentences,
+        self.lengths : batch_sample.sentence_lengths
         }
 
     def get_output(self):
@@ -85,7 +90,24 @@ class NarytreeLSTM(object):
         _, nodes_h_unscattered = self.get_outputs()
         return nodes_h_unscattered
 
+    def get_sentence_lstm_ouput(self, sentences, lengths):
+
+        with tf.variable_scope("lstm_attn", reuse=True):
+
+            sen_embedding = tf.nn.embedding_lookup(self.embedding, sentences)
+            cell = tf.contrib.rnn.LSTMCell(self.config.hidden_dim)
+
+            zero_init_state = tf.identity(sen_embedding[:, 0] * 0)
+            init = tf.contrib.rnn.LSTMStateTuple(zero_init_state, zero_init_state)
+
+            return tf.nn.dynamic_rnn(cell, sen_embedding, lengths, dtype=tf.float32 , initial_state=init)
+
+
+
     def get_outputs(self):
+        attn_src = self.get_sentence_lstm_ouput(self.sentences, self.lengths)
+        print("Attention src: ", attn_src)
+
         with tf.variable_scope("Node", reuse=True):
             W = tf.get_variable("W", [self.config.emb_dim, self.config.hidden_dim])
             U = tf.get_variable("U", [self.config.hidden_dim * self.config.degree , self.config.hidden_dim * (3 + self.config.degree)])
@@ -102,6 +124,8 @@ class NarytreeLSTM(object):
             idx_var = tf.constant(0, dtype=tf.int32)
             hidden_shape = tf.constant([-1, self.config.hidden_dim * self.config.degree], dtype=tf.int32)
             out_shape = tf.stack([-1,self.batch_size, self.config.hidden_dim], 0)
+
+
 
             def _recurrence(nodes_h, nodes_c, nodes_h_scattered, idx_var):
                 out_ = tf.concat([nbf, b], axis=0)
@@ -172,6 +196,8 @@ class NarytreeLSTM(object):
 
 
                 input_embed = tf.reshape(tf.nn.embedding_lookup(self.embedding, observable),[-1,self.config.emb_dim])
+
+
 
                 def compute_input():
                     out = tf.matmul(input_embed, W)
@@ -309,49 +335,49 @@ class SoftMaxNarytreeLSTM(object):
         return score
 
 
-def test_lstm_model():
-    class Config(object):
-        num_emb = 10
-        emb_dim = 3
-        hidden_dim = 4
-        output_dim = None
-        degree = 2
-        num_epochs = 3
-        early_stopping = 2
-        dropout = 0.5
-        lr = 1.0
-        emb_lr = 0.1
-        reg = 0.0001
-        fine_grained = False
-        trainable_embeddings = False
-        embeddings = None
-        batch_size=7
-
-    tree = BatchTree.empty_tree()
-    tree.root.add_sample(-1, 1)
-    tree.root.expand_or_add_child(-1, 1, 0)
-    tree.root.expand_or_add_child(1, 1, 1)
-    tree.root.children[0].expand_or_add_child(1, 0, 0)
-    tree.root.children[0].expand_or_add_child(1, 0,  1)
-
-    tree.root.add_sample(-1, 1)
-    tree.root.expand_or_add_child(2, 1, 0)
-    tree.root.expand_or_add_child(2, 1, 1)
-
-    tree.root.add_sample(-1, 1)
-    tree.root.expand_or_add_child(-1, 1, 0)
-    tree.root.expand_or_add_child(3, 1, 1)
-    tree.root.children[0].expand_or_add_child(3, 0, 0)
-    tree.root.children[0].expand_or_add_child(3, 0, 1)
-
-    sample = BatchTreeSample(tree)
-
-    model = NarytreeLSTM(Config())
-    sess = tf.InteractiveSession()
-    tf.global_variables_initializer().run()
-    v = sess.run(model.get_output(),feed_dict=model.get_feed_dict(sample))
-    print(v)
-    return 0
+# def test_lstm_model():
+#     class Config(object):
+#         num_emb = 10
+#         emb_dim = 3
+#         hidden_dim = 4
+#         output_dim = None
+#         degree = 2
+#         num_epochs = 3
+#         early_stopping = 2
+#         dropout = 0.5
+#         lr = 1.0
+#         emb_lr = 0.1
+#         reg = 0.0001
+#         fine_grained = False
+#         trainable_embeddings = False
+#         embeddings = None
+#         batch_size=7
+#
+#     tree = BatchTree.empty_tree()
+#     tree.root.add_sample(-1, 1)
+#     tree.root.expand_or_add_child(-1, 1, 0)
+#     tree.root.expand_or_add_child(1, 1, 1)
+#     tree.root.children[0].expand_or_add_child(1, 0, 0)
+#     tree.root.children[0].expand_or_add_child(1, 0,  1)
+#
+#     tree.root.add_sample(-1, 1)
+#     tree.root.expand_or_add_child(2, 1, 0)
+#     tree.root.expand_or_add_child(2, 1, 1)
+#
+#     tree.root.add_sample(-1, 1)
+#     tree.root.expand_or_add_child(-1, 1, 0)
+#     tree.root.expand_or_add_child(3, 1, 1)
+#     tree.root.children[0].expand_or_add_child(3, 0, 0)
+#     tree.root.children[0].expand_or_add_child(3, 0, 1)
+#
+#     sample = BatchTreeSample(tree)
+#
+#     model = NarytreeLSTM(Config())
+#     sess = tf.InteractiveSession()
+#     tf.global_variables_initializer().run()
+#     v = sess.run(model.get_output(),feed_dict=model.get_feed_dict(sample))
+#     print(v)
+#     return 0
 
 
 def test_softmax_model():
@@ -373,16 +399,26 @@ def test_softmax_model():
         embeddings = None
 
     tree = BatchTree.empty_tree()
+    tree.root.begin_sentence()
+    tree.root.add_sample(-1, 100)
+    tree.root.expand_or_add_child(0, 10, 0)
+    tree.root.expand_or_add_child(0, 20, 1)
 
-    tree.root.add_sample(7, 1)
+    tree.root.begin_sentence()
+    tree.root.add_sample(-1, 200)
+    tree.root.expand_or_add_child(-1, 30, 0)
+    tree.root.expand_or_add_child(-1, 40, 1)
+    tree.root.children[0].expand_or_add_child(0, 1, 0)
+    tree.root.children[0].expand_or_add_child(0, 2, 1)
 
-    tree.root.add_sample(-1, 1)
-    tree.root.expand_or_add_child(-1, 1, 0)
-    tree.root.expand_or_add_child(-1, 1, 1)
-    tree.root.children[0].expand_or_add_child(3, 0, 0)
-    tree.root.children[0].expand_or_add_child(3, 0, 1)
-    tree.root.children[1].expand_or_add_child(3, 0, 0)
-    tree.root.children[1].expand_or_add_child(3, 0, 1)
+    tree.root.begin_sentence()
+    tree.root.add_sample(-1, 300)
+    tree.root.expand_or_add_child(-1, 50, 0)
+    tree.root.expand_or_add_child(-1, 60, 1)
+    tree.root.children[0].expand_or_add_child(0, 3, 0)
+    tree.root.children[0].expand_or_add_child(0, 4, 1)
+    tree.root.children[1].expand_or_add_child(0, 5, 0)
+    tree.root.children[1].expand_or_add_child(0, 6, 1)
 
     # tree.root.add_sample(1)
     # labels = np.array([[0, 1]])
