@@ -38,6 +38,7 @@ class Vocab(object):
     def decode(self,idx):
         assert idx < len(self.words) and idx >=0
         return self.idx2word[idx]
+
     def size(self):
         return len(self.words)
 
@@ -145,7 +146,7 @@ def parse_tree(sentence, parents, labels):
             idx = i
             prev = None
             while True:
-                node = tNode(idx)  
+                node = tNode(idx)
                 if prev is not None:
                     assert prev.idx != node.idx
                     node.add_child(prev)
@@ -235,15 +236,48 @@ def build_batch_trees(trees, mini_batch_size):
             batch_node.expand_or_add_child(child[1].word, child[1].label, child[0])
         for children in zip(batch_node.children, sample_node.children): # Recursive function call
             expand_batch_with_sample(children[0], children[1])
+
     batches = []
     while(len(trees)>0):
         batch = trees[-mini_batch_size:]
         del trees[-mini_batch_size:]
         batch_tree = BatchTree.empty_tree()
+
+        batch_sentences = []
+
         for tree in batch:
             expand_batch_with_sample(batch_tree.root, tree)
-        batches.append(BatchTreeSample(batch_tree))
+            sentence = extract_sentence(tree)
+            batch_sentences.append(sentence)
+        batch_sentences, lens = fill_data(batch_sentences)
+        batch_tree = BatchTreeSample(batch_tree)
+        batch_tree.add_batch_sentences(batch_sentences, lens)
+        batches.append(batch_tree)
     return batches
+
+
+def fill_data(data):
+    # Get lengths of each row of data
+    lens = np.array([len(i) for i in data])
+
+    # Mask of valid places in each row
+    mask = np.arange(lens.max()) < lens[:, None]
+
+    # Setup output array and put elements from data into masked positions
+    out = np.ones(mask.shape, dtype=np.int32)
+    out[mask] = np.concatenate(data)
+    return out, lens
+
+def extract_sentence(tree):
+    sentence = []
+    def extract(root):
+        for c in root.children:
+            extract(c)
+        if root.word:
+            sentence.append(root.word)
+
+    extract(tree)
+    return sentence
 
 
 def build_labelized_batch_trees(data, mini_batch_size):
