@@ -285,6 +285,7 @@ class SoftMaxNarytreeLSTM(object):
         for batch in data:
             total_error += self.train(batch[0], batch[1], session)
         print 'average error :', total_error/len(data)
+        return total_error/len(data)
 
     def test(self, data, session):
         ys_true = collections.deque([])
