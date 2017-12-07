@@ -95,18 +95,21 @@ class NarytreeLSTM(object):
         with tf.variable_scope("lstm_attn", reuse=True):
 
             sen_embedding = tf.nn.embedding_lookup(self.embedding, sentences)
-            cell = tf.contrib.rnn.LSTMCell(self.config.hidden_dim)
+            cell = tf.nn.rnn_cell.BasicLSTMCell(self.config.hidden_dim, reuse=tf.AUTO_REUSE)
+            #zero_init_state = tf.identity(sen_embedding[:, 0] * 0)
+            #init = tf.contrib.rnn.LSTMStateTuple(zero_init_state, zero_init_state)
 
-            zero_init_state = tf.identity(sen_embedding[:, 0] * 0)
-            init = tf.contrib.rnn.LSTMStateTuple(zero_init_state, zero_init_state)
+            #return tf.nn.dynamic_rnn(cell, sen_embedding, lengths, dtype=tf.float32 , initial_state=init)
+            outputs, final_state = tf.nn.dynamic_rnn(cell, sen_embedding, lengths, dtype=tf.float32)
 
-            return tf.nn.dynamic_rnn(cell, sen_embedding, lengths, dtype=tf.float32 , initial_state=init)
+            return outputs, final_state
 
 
 
     def get_outputs(self):
-        attn_src = self.get_sentence_lstm_ouput(self.sentences, self.lengths)
-        print("Attention src: ", attn_src)
+        attn_src, _ = self.get_sentence_lstm_ouput(self.sentences, self.lengths)
+        #print("Attention src", attn_src)
+        attn_src_tiled = tf.tile(attn_src, [1, 2, 1]) # Tile the leaves' hidden representation by 2 for element-wise multiplication
 
         with tf.variable_scope("Node", reuse=True):
             W = tf.get_variable("W", [self.config.emb_dim, self.config.hidden_dim])
@@ -211,6 +214,19 @@ class NarytreeLSTM(object):
                 out_ += tf.cond(tf.less(0, tf.squeeze(observables_size)),
                                lambda: compute_input(),
                                lambda: const0f)
+
+                def compute_attn():
+                    scatter_indice_begin, scatter_indice_size, child_scatters = compute_indices()
+
+                    h = nodes_h.read(idx_var - 1)
+                    hs = tf.scatter_nd(child_scatters, h, tf.shape(h), name=None)
+                    hs = tf.reshape(hs, hidden_shape)
+
+                    hs_left, hs_right = tf.split(hs, num_or_size_splits=2, axis=1) # Separate the hidden representation of left and right child of root
+
+                out_ += tf.cond(tf.equal(idx_var, self.tree_height),
+                                lambda: compute_attn(),
+                                lambda: const0f)
 
                 v = tf.split(out_, 3 + self.config.degree, axis=1)
                 vf = tf.sigmoid(tf.concat(v[:self.config.degree], axis=1))
