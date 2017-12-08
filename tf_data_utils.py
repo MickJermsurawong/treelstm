@@ -43,24 +43,35 @@ class Vocab(object):
         return len(self.words)
 
     def compute_gloves_embedding(self, glove_dir):
-        vector_format = 'f' * 300
-        size = struct.calcsize(vector_format)
-        glove_voc = Vocab(os.path.join(glove_dir, 'glove_vocab.txt'))
-        self.embed_matrix = np.random.rand(self.size(), 300) * 0.1 - 0.05
-        with open(os.path.join(glove_dir, 'glove_embeddings.b'), "rb") as fi:
-            id = 0
-            while True:
-                vector = fi.read(size)
-                if len(vector) == size:
-                    v = struct.unpack(vector_format, vector)
-                    idx = self.encode(glove_voc.decode(id))
-                    if idx is not None:
-                        self.embed_matrix[idx,:] = v
-                else:
-                    break
-                id += 1
-                if(id%100000 == 0):
-                    print("read " + str(id) + " embeds and counting...")
+        tree_glove_file = "data/glove/glove_embeddings_tree.npy"
+
+        if os.path.exists(tree_glove_file):
+            saved_glove = np.load(tree_glove_file)
+            print("Found glove tree embedding of {}...".format(saved_glove.shape))
+            assert saved_glove.shape[0] == self.size()
+            self.embed_matrix = saved_glove
+        else:
+            vector_format = 'f' * 300
+            size = struct.calcsize(vector_format)
+            glove_voc = Vocab(os.path.join(glove_dir, 'glove_vocab.txt'))
+            self.embed_matrix = np.random.rand(self.size(), 300) * 0.1 - 0.05
+            with open(os.path.join(glove_dir, 'glove_embeddings.b'), "rb") as fi:
+                id = 0
+                while True:
+                    vector = fi.read(size)
+                    if len(vector) == size:
+                        v = struct.unpack(vector_format, vector)
+                        idx = self.encode(glove_voc.decode(id))
+                        if idx is not None:
+                            self.embed_matrix[idx,:] = v
+                    else:
+                        break
+                    id += 1
+                    if(id%100000 == 0):
+                        print("read " + str(id) + " embeds and counting...")
+            np.save(tree_glove_file, self.embed_matrix)
+            print("Saved glove tree file {}!".format(tree_glove_file))
+
 
 def load_sentiment_treebank(data_dir, glove_dir, fine_grained):
     voc=Vocab(os.path.join(data_dir,'vocab-cased.txt'))
