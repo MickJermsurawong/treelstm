@@ -5,6 +5,10 @@ from sklearn import metrics
 import collections
 
 
+def calc_wt_init(fan_in=300):
+    eps = 1.0 / np.sqrt(fan_in)
+    return eps
+
 class NarytreeLSTM(object):
     def __init__(self, config=None):
         self.config = config
@@ -25,10 +29,6 @@ class NarytreeLSTM(object):
                                tf.contrib.layers.xavier_initializer(),
                                regularizer=tf.contrib.layers.l2_regularizer(self.config.reg)
                                ):
-
-            def calc_wt_init(self, fan_in=300):
-                eps = 1.0 / np.sqrt(fan_in)
-                return eps
 
             self.U = tf.get_variable("U", [config.hidden_dim * config.degree , config.hidden_dim * (3 + config.degree)], initializer=tf.random_uniform_initializer(-calc_wt_init(config.hidden_dim),calc_wt_init(config.hidden_dim)))
             self.W = tf.get_variable("W", [config.emb_dim, config.hidden_dim], initializer=tf.random_uniform_initializer(-calc_wt_init(config.emb_dim),calc_wt_init(config.emb_dim)))
@@ -59,6 +59,7 @@ class NarytreeLSTM(object):
 
             if config.trainable_embeddings:
                 self.training_variables.append(self.embedding)
+
 
 
     def get_feed_dict(self, batch_sample, dropout = 1.0):
@@ -95,13 +96,23 @@ class NarytreeLSTM(object):
     def get_attention(self):
         return self.attention
 
-    def get_sentence_lstm_ouput(self, sentences, lengths, scope):
-
+    def get_sentence_lstm_ouput(self, sentences, lengths, scope, is_bidirectional):
         sen_embedding = tf.nn.embedding_lookup(self.embedding, sentences)
 
         with tf.variable_scope(scope, reuse=True):
+
             cell = tf.nn.rnn_cell.BasicLSTMCell(self.config.hidden_dim, reuse=tf.AUTO_REUSE)
-            outputs, final_state = tf.nn.dynamic_rnn(cell, sen_embedding, lengths, dtype=tf.float32)
+            if is_bidirectional:
+                cell_bw = tf.nn.rnn_cell.BasicLSTMCell(self.config.hidden_dim, reuse=tf.AUTO_REUSE)
+                bi_lstm_output, final_state = tf.nn.bidirectional_dynamic_rnn(cell, cell_bw, sen_embedding,
+                                                                              sequence_length=lengths, dtype=tf.float32)
+                outputs = tf.concat([bi_lstm_output[0], bi_lstm_output[1]], axis=2)
+                outputs = tf.layers.dense(outputs, self.config.hidden_dim, name="lstm-output-proj",
+                                          kernel_initializer=tf.random_uniform_initializer(-calc_wt_init(self.config.hidden_dim),
+                                                                                           calc_wt_init(self.config.hidden_dim)),
+                                          reuse=tf.AUTO_REUSE)
+            else:
+                outputs, final_state = tf.nn.dynamic_rnn(cell, sen_embedding, lengths, dtype=tf.float32)
             return outputs, final_state
 
     def get_outputs(self):
@@ -113,7 +124,7 @@ class NarytreeLSTM(object):
             b = tf.get_variable("b", [3 * self.config.hidden_dim])
             bf = tf.get_variable("bf", [self.config.hidden_dim])
 
-            attn_src, _ = self.get_sentence_lstm_ouput(self.sentences, self.lengths, "lstm_attn")
+            attn_src, _ = self.get_sentence_lstm_ouput(self.sentences, self.lengths, "lstm_attn", is_bidirectional=False)
 
             nbf = tf.tile(bf, [self.config.degree])
             # nbf = tf.Print(nbf, [attn_src_l, tf.shape(attn_src_l)], "attn_src_l")
@@ -219,8 +230,10 @@ class NarytreeLSTM(object):
                 def compute_attn_ctx(flat_src_l, flat_src_r):
 
                     def compute(h_child, flat_src):
-                        h_child = tf.expand_dims(h_child, axis=1)
-                        matching_score = tf.reduce_sum(h_child * flat_src, axis=-1)
+                        h_child = tf.reshape(h_child, [-1, self.config.hidden_dim])
+                        child_proj = tf.layers.dense(h_child, self.config.hidden_dim, name="child_attn-proj", reuse=tf.AUTO_REUSE)
+                        child_proj = tf.expand_dims(child_proj, axis=1)
+                        matching_score = tf.squeeze(tf.layers.dense(tf.nn.tanh(child_proj + flat_src), 1, name="attn_score", reuse=tf.AUTO_REUSE), axis=-1)
                         attn_weights = restricted_softmax_on_sequence(matching_score, tf.shape(self.sentences)[1], self.lengths)
                         return tf.reduce_sum(flat_src * tf.expand_dims(attn_weights, axis=-1), axis=1), attn_weights
 
@@ -331,7 +344,7 @@ class SoftMaxNarytreeLSTM(object):
                 # here we make sure we can identify it for a distinct gradient flow
                 tvars.remove(self.training_variables[-1])
                 tvars.append(self.training_variables[-1])
-                self.gv = zip(tf.gradients(self.loss, self.training_variables),self.training_variables)
+                self.gv = zip(tf.gradients(self.loss, tvars), tvars)
                 self.opt = self.optimizer.apply_gradients(self.gv[:-1])
                 self.embed_opt = self.embed_optimizer.apply_gradients(self.gv[-1:])
             else:
