@@ -240,13 +240,13 @@ def extract_tree_data(tree,max_degree=2,only_leaves_have_vals=True,with_labels=F
                np.array(tree_str,dtype='int32'))
 
 def build_batch_trees(trees, mini_batch_size):
-    def expand_batch_with_sample(batch_node, sample_node):
+    def expand_batch_with_sample(batch_node, sample_node, tree_index):
         if batch_node.parent is None: # root
-            batch_node.add_sample(-1 if sample_node.word is None else sample_node.word, tree.label)
+            batch_node.add_sample(-1 if sample_node.word is None else sample_node.word, tree.label, tree_index)
         for child in zip(range(len(sample_node.children)),sample_node.children): # iterate over direct children, [(0, child0), (1, child1), ...]
-            batch_node.expand_or_add_child(child[1].word, child[1].label, child[0])
+            batch_node.expand_or_add_child(child[1].word, child[1].label, child[0], tree_index)
         for children in zip(batch_node.children, sample_node.children): # Recursive function call
-            expand_batch_with_sample(children[0], children[1])
+            expand_batch_with_sample(children[0], children[1], tree_index)
 
     batches = []
     while(len(trees)>0):
@@ -256,8 +256,8 @@ def build_batch_trees(trees, mini_batch_size):
 
         batch_sentences = []
 
-        for tree in batch:
-            expand_batch_with_sample(batch_tree.root, tree)
+        for i, tree in enumerate(batch):
+            expand_batch_with_sample(batch_tree.root, tree, i)
             sentence = extract_sentence(tree)
             batch_sentences.append(sentence)
         batch_sentences, lens = fill_data(batch_sentences)

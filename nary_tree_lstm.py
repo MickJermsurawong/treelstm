@@ -5,9 +5,7 @@ from sklearn import metrics
 import collections
 
 
-def calc_wt_init(fan_in=300):
-    eps = 1.0 / np.sqrt(fan_in)
-    return eps
+
 
 class NarytreeLSTM(object):
     def __init__(self, config=None):
@@ -22,13 +20,16 @@ class NarytreeLSTM(object):
             self.embedding = tf.Variable(initial_value=initializer, trainable=config.trainable_embeddings,
                                          dtype='float32')
 
-
         with tf.variable_scope("Node",
                                initializer=
                                # tf.ones_initializer(),
                                tf.contrib.layers.xavier_initializer(),
                                regularizer=tf.contrib.layers.l2_regularizer(self.config.reg)
                                ):
+
+            def calc_wt_init(fan_in=300):
+                eps = 1.0 / np.sqrt(fan_in)
+                return eps
 
             self.U = tf.get_variable("U", [config.hidden_dim * config.degree , config.hidden_dim * (3 + config.degree)], initializer=tf.random_uniform_initializer(-calc_wt_init(config.hidden_dim),calc_wt_init(config.hidden_dim)))
             self.W = tf.get_variable("W", [config.emb_dim, config.hidden_dim], initializer=tf.random_uniform_initializer(-calc_wt_init(config.emb_dim),calc_wt_init(config.emb_dim)))
@@ -53,6 +54,8 @@ class NarytreeLSTM(object):
 
             self.sentences = tf.placeholder(tf.int32, shape=[None, None])
             self.lengths = tf.placeholder(tf.int32, shape=[None])
+            self.tree_idxs = tf.placeholder(tf.int32, shape=[None])
+
             self.attention = None
 
             self.training_variables = [self.U, self.W, self.b, self.bf]
@@ -63,9 +66,6 @@ class NarytreeLSTM(object):
 
 
     def get_feed_dict(self, batch_sample, dropout = 1.0):
-        #print batch_sample.scatter_in
-        #print batch_sample.scatter_in_indices
-        #print batch_sample.nodes_count_per_indice, "nodes_count_per_indice"
         return {
         self.observables : batch_sample.observables,
         self.flows : batch_sample.flows,
@@ -82,7 +82,8 @@ class NarytreeLSTM(object):
         self.dropout : dropout,
         self.nodes_count_per_indice : batch_sample.nodes_count_per_indice,
         self.sentences : batch_sample.sentences,
-        self.lengths : batch_sample.sentence_lengths
+        self.lengths : batch_sample.sentence_lengths,
+        self.tree_idxs : batch_sample.tree_idxs
         }
 
     def get_output(self):
@@ -224,45 +225,78 @@ class NarytreeLSTM(object):
                                lambda: compute_input(),
                                lambda: const0f)
 
-                # out_ = tf.Print(out_, [idx_var, computed_input_val, tf.shape(computed_input_val)], "computed input")
                 out_ += computed_input_val
 
                 def compute_attn_ctx(flat_src_l, flat_src_r):
 
-                    def compute(h_child, flat_src):
+                    def compute(h_child, flat_src, length):
+                        """
+                        Compute context and attention weights. Note that flat source here needs not be unique, because hidden state of child at the same level can come from the same tree.
+                        :param h_child: hidden child state in batch [num_child, hidden_dim]
+                        :param flat_src: flat sentence source where the order does correspond with the order of h_child
+                        :param length: length of each sentence of the flat source
+                        :return: context and attention weights
+                        """
+
+                        # This implementation follows additive style according to
+                        # https://github.com/tensorflow/nmt#background-on-the-attention-mechanism
+
                         h_child = tf.reshape(h_child, [-1, self.config.hidden_dim])
                         child_proj = tf.layers.dense(h_child, self.config.hidden_dim, name="child_attn-proj", reuse=tf.AUTO_REUSE)
                         child_proj = tf.expand_dims(child_proj, axis=1)
+
                         matching_score = tf.squeeze(tf.layers.dense(tf.nn.tanh(child_proj + flat_src), 1, name="attn_score", reuse=tf.AUTO_REUSE), axis=-1)
-                        attn_weights = restricted_softmax_on_sequence(matching_score, tf.shape(self.sentences)[1], self.lengths)
-                        return tf.reduce_sum(flat_src * tf.expand_dims(attn_weights, axis=-1), axis=1), attn_weights
+                        attn_ws = restricted_softmax_on_sequence(matching_score, tf.shape(self.sentences)[1], length)
+
+                        context = tf.reduce_sum(flat_src * tf.expand_dims(attn_ws, axis=-1), axis=1)
+                        return context, attn_ws
 
                     scatter_indice_begin, scatter_indice_size, child_scatters = compute_indices()
 
-                    k = nodes_h.read(idx_var - 1)
-                    ks = tf.scatter_nd(child_scatters, k, tf.shape(k), name=None)
-                    # ks = tf.Print(ks, [ks, tf.shape(ks)], "attention last layer")
+                    child_hs_in_batch = nodes_h.read(idx_var - 1)
+                    children_in_pairs = tf.scatter_nd(child_scatters, child_hs_in_batch, tf.shape(child_hs_in_batch), name="child_batch_to_pairs")
 
-                    idx_range = tf.range(tf.shape(ks)[0])
+                    # create index to extract left and right children
+                    idx_range = tf.range(tf.shape(children_in_pairs)[0])
                     even_odd_idx = tf.transpose(tf.reshape(idx_range, [-1, 2]))
-                    # print("even odd idx", even_odd_idx)
                     even_idx = even_odd_idx[0]
                     odd_idx = even_odd_idx[1]
 
-                    hs_left = tf.gather(ks, even_idx)
-                    hs_right = tf.gather(ks, odd_idx)
-                    ctx_left, attn_weights_l = compute(hs_left, flat_src_l)
-                    ctx_right, attn_weights_r = compute(hs_right, flat_src_r)
+                    child_h_left = tf.gather(children_in_pairs, even_idx)
+                    child_h_right = tf.gather(children_in_pairs, odd_idx)
+
+                    # create sentence indices
+                    level_indice_begin, level_indice_end = tf.split(tf.slice(self.out_indices, prev_idx_var_dim1, [2]), 2)
+                    level_indice_size = level_indice_end - level_indice_begin
+                    tree_idx_in_batch = tf.slice(self.tree_idxs, level_indice_begin, level_indice_size)
+                    tree_idx_in_pairs = tf.scatter_nd(child_scatters, tree_idx_in_batch, tf.shape(tree_idx_in_batch), name="tree_idx_batch_to_pairs")
+
+                    idx_left = tf.gather(tree_idx_in_pairs, even_idx)
+                    idx_right = tf.gather(tree_idx_in_pairs, odd_idx)
+
+                    # extract the sentences for the level
+                    flat_src_l = tf.gather(flat_src_l, idx_left)
+                    len_l = tf.gather(self.lengths, idx_left)
+                    flat_src_r = tf.gather(flat_src_r, idx_right)
+                    len_r = tf.gather(self.lengths, idx_right)
+
+                    # compute ctx and attn
+                    ctx_left, attn_weights_l = compute(child_h_left, flat_src_l, len_l)
+                    ctx_right, attn_weights_r = compute(child_h_right, flat_src_r, len_r)
 
                     ctx_overall = ctx_left + ctx_right
-                    attn_weights = attn_weights_l + attn_weights_r
+                    attn_w_level = attn_weights_l + attn_weights_r
 
                     ctx_overall = tf.tile(ctx_overall, [1, 3 + self.config.degree])
 
-                    return ctx_overall, attn_weights
+                    scatters_in = tf.slice(self.scatter_in, scatter_indice_begin, scatter_indice_size)
+                    scatters_in = tf.reshape(scatters_in, tf.concat([scatter_indice_size, [-1]], 0))
+                    ctx_overall = tf.scatter_nd(scatters_in, ctx_overall, u_scatter_shape, name=None)
+
+                    return ctx_overall, attn_w_level
 
 
-                attn_ctx, attn_weights = tf.cond(tf.equal(idx_var, self.tree_height - 1),
+                attn_ctx, attn_weights = tf.cond(tf.less(0, idx_var),
                                 lambda: compute_attn_ctx(attn_src, attn_src),
                                 lambda: (const0f, tf.zeros((1, tf.reduce_max(self.lengths)))))
 
@@ -481,23 +515,26 @@ def test_softmax_model():
         embeddings = None
 
     tree = BatchTree.empty_tree()
-    tree.root.add_sample(-1, 100)
-    tree.root.expand_or_add_child(0, 10, 0)
-    tree.root.expand_or_add_child(0, 20, 1)
+    tree_0 = 0
+    tree.root.add_sample(-1, 100, tree_0)
+    tree.root.expand_or_add_child(0, 10, 0, tree_0)
+    tree.root.expand_or_add_child(0, 20, 1, tree_0)
 
-    tree.root.add_sample(-1, 200)
-    tree.root.expand_or_add_child(-1, 30, 0)
-    tree.root.expand_or_add_child(-1, 40, 1)
-    tree.root.children[0].expand_or_add_child(0, 1, 0)
-    tree.root.children[0].expand_or_add_child(0, 2, 1)
+    tree_1 = 1
+    tree.root.add_sample(-1, 200, tree_1)
+    tree.root.expand_or_add_child(-1, 30, 0, tree_1)
+    tree.root.expand_or_add_child(-1, 40, 1, tree_1)
+    tree.root.children[0].expand_or_add_child(0, 1, 0, tree_1)
+    tree.root.children[0].expand_or_add_child(0, 2, 1, tree_1)
 
-    tree.root.add_sample(-1, 300)
-    tree.root.expand_or_add_child(-1, 50, 0)
-    tree.root.expand_or_add_child(-1, 60, 1)
-    tree.root.children[0].expand_or_add_child(0, 3, 0)
-    tree.root.children[0].expand_or_add_child(0, 4, 1)
-    tree.root.children[1].expand_or_add_child(0, 5, 0)
-    tree.root.children[1].expand_or_add_child(0, 6, 1)
+    tree_2 = 2
+    tree.root.add_sample(-1, 300, tree_2)
+    tree.root.expand_or_add_child(-1, 50, 0, tree_2)
+    tree.root.expand_or_add_child(-1, 60, 1, tree_2)
+    tree.root.children[0].expand_or_add_child(0, 3, 0, tree_2)
+    tree.root.children[0].expand_or_add_child(0, 4, 1, tree_2)
+    tree.root.children[1].expand_or_add_child(0, 5, 0, tree_2)
+    tree.root.children[1].expand_or_add_child(0, 6, 1, tree_2)
 
     batch_sample = BatchTreeSample(tree)
 
