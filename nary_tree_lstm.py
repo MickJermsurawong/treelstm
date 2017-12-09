@@ -5,7 +5,9 @@ from sklearn import metrics
 import collections
 
 
-
+def calc_wt_init(fan_in=300):
+    eps = 1.0 / np.sqrt(fan_in)
+    return eps
 
 class NarytreeLSTM(object):
     def __init__(self, config=None):
@@ -27,9 +29,7 @@ class NarytreeLSTM(object):
                                regularizer=tf.contrib.layers.l2_regularizer(self.config.reg)
                                ):
 
-            def calc_wt_init(fan_in=300):
-                eps = 1.0 / np.sqrt(fan_in)
-                return eps
+
 
             self.U = tf.get_variable("U", [config.hidden_dim * config.degree , config.hidden_dim * (3 + config.degree)], initializer=tf.random_uniform_initializer(-calc_wt_init(config.hidden_dim),calc_wt_init(config.hidden_dim)))
             self.W = tf.get_variable("W", [config.emb_dim, config.hidden_dim], initializer=tf.random_uniform_initializer(-calc_wt_init(config.emb_dim),calc_wt_init(config.emb_dim)))
@@ -55,6 +55,7 @@ class NarytreeLSTM(object):
             self.sentences = tf.placeholder(tf.int32, shape=[None, None])
             self.lengths = tf.placeholder(tf.int32, shape=[None])
             self.tree_idxs = tf.placeholder(tf.int32, shape=[None])
+            self.span_idxs = tf.placeholder(tf.int32, shape=[None, 2])
 
             self.attention = None
 
@@ -83,7 +84,8 @@ class NarytreeLSTM(object):
         self.nodes_count_per_indice : batch_sample.nodes_count_per_indice,
         self.sentences : batch_sample.sentences,
         self.lengths : batch_sample.sentence_lengths,
-        self.tree_idxs : batch_sample.tree_idxs
+        self.tree_idxs : batch_sample.tree_idxs,
+        self.span_idxs : batch_sample.span_idxs,
         }
 
     def get_output(self):
@@ -125,10 +127,10 @@ class NarytreeLSTM(object):
             b = tf.get_variable("b", [3 * self.config.hidden_dim])
             bf = tf.get_variable("bf", [self.config.hidden_dim])
 
-            attn_src, _ = self.get_sentence_lstm_ouput(self.sentences, self.lengths, "lstm_attn", is_bidirectional=False)
+            attn_src, _ = self.get_sentence_lstm_ouput(self.sentences, self.lengths, "lstm_attn", is_bidirectional=True)
 
             nbf = tf.tile(bf, [self.config.degree])
-            # nbf = tf.Print(nbf, [attn_src_l, tf.shape(attn_src_l)], "attn_src_l")
+            nbf = tf.Print(nbf, [self.span_idxs], "span_idxs")
 
             nodes_h_scattered = tf.TensorArray(tf.float32, size=self.tree_height, clear_after_read=False)
             nodes_h = tf.TensorArray(tf.float32, size = self.tree_height, clear_after_read=False)
@@ -516,25 +518,25 @@ def test_softmax_model():
 
     tree = BatchTree.empty_tree()
     tree_0 = 0
-    tree.root.add_sample(-1, 100, tree_0)
-    tree.root.expand_or_add_child(0, 10, 0, tree_0)
-    tree.root.expand_or_add_child(0, 20, 1, tree_0)
+    tree.root.add_sample(-1, 100, tree_0, [0, 1])
+    tree.root.expand_or_add_child(0, 10, 0, tree_0, [0, 0])
+    tree.root.expand_or_add_child(0, 20, 1, tree_0, [1, 1])
 
     tree_1 = 1
-    tree.root.add_sample(-1, 200, tree_1)
-    tree.root.expand_or_add_child(-1, 30, 0, tree_1)
-    tree.root.expand_or_add_child(-1, 40, 1, tree_1)
-    tree.root.children[0].expand_or_add_child(0, 1, 0, tree_1)
-    tree.root.children[0].expand_or_add_child(0, 2, 1, tree_1)
+    tree.root.add_sample(-1, 200, tree_1, [0, 2])
+    tree.root.expand_or_add_child(-1, 30, 0, tree_1, [0, 1])
+    tree.root.expand_or_add_child(-1, 40, 1, tree_1, [2, 2])
+    tree.root.children[0].expand_or_add_child(0, 1, 0, tree_1, [0, 0])
+    tree.root.children[0].expand_or_add_child(0, 2, 1, tree_1, [1, 1])
 
     tree_2 = 2
-    tree.root.add_sample(-1, 300, tree_2)
-    tree.root.expand_or_add_child(-1, 50, 0, tree_2)
-    tree.root.expand_or_add_child(-1, 60, 1, tree_2)
-    tree.root.children[0].expand_or_add_child(0, 3, 0, tree_2)
-    tree.root.children[0].expand_or_add_child(0, 4, 1, tree_2)
-    tree.root.children[1].expand_or_add_child(0, 5, 0, tree_2)
-    tree.root.children[1].expand_or_add_child(0, 6, 1, tree_2)
+    tree.root.add_sample(-1, 300, tree_2, [0, 3])
+    tree.root.expand_or_add_child(-1, 50, 0, tree_2, [0, 1])
+    tree.root.expand_or_add_child(-1, 60, 1, tree_2, [2, 3])
+    tree.root.children[0].expand_or_add_child(0, 3, 0, tree_2, [0, 0])
+    tree.root.children[0].expand_or_add_child(0, 4, 1, tree_2, [1, 1])
+    tree.root.children[1].expand_or_add_child(0, 5, 0, tree_2, [2, 2])
+    tree.root.children[1].expand_or_add_child(0, 6, 1, tree_2, [3, 3])
 
     batch_sample = BatchTreeSample(tree)
 
@@ -542,7 +544,7 @@ def test_softmax_model():
     lens = [2, 2, 4]
     batch_sample.add_batch_sentences(all_sen, lens)
 
-    observables, flows, mask, scatter_out, scatter_in, scatter_in_indices, labels, observables_indices, out_indices, childs_transpose_scatter, nodes_count, nodes_count_per_indice = tree.build_batch_tree_sample()
+    observables, flows, mask, scatter_out, scatter_in, scatter_in_indices, labels, observables_indices, out_indices, childs_transpose_scatter, nodes_count, nodes_count_per_indice, tree_idx = tree.build_batch_tree_sample()
     print observables, "observables"
     print observables_indices, "observables_indices"
     print flows, "flows"
@@ -555,6 +557,7 @@ def test_softmax_model():
     print childs_transpose_scatter, "childs_transpose_scatter"
     print nodes_count, "nodes_count"
     print nodes_count_per_indice, "nodes_count_per_indice"
+    print tree_idx, "tree idxs"
 
     labels = np.array([0,1,0,1,0])
 
