@@ -18,6 +18,7 @@ class NarytreeLSTM(object):
             self.embedding = tf.Variable(initial_value=initializer, trainable=config.trainable_embeddings,
                                          dtype='float32')
 
+
         with tf.variable_scope("Node",
                                initializer=
                                # tf.ones_initializer(),
@@ -33,8 +34,6 @@ class NarytreeLSTM(object):
             self.W = tf.get_variable("W", [config.emb_dim, config.hidden_dim], initializer=tf.random_uniform_initializer(-calc_wt_init(config.emb_dim),calc_wt_init(config.emb_dim)))
             self.b = tf.get_variable("b", [config.hidden_dim*3], initializer=tf.random_uniform_initializer(-calc_wt_init(config.hidden_dim),calc_wt_init(config.hidden_dim)))#, regularizer=tf.contrib.layers.l2_regularizer(0.0))
             self.bf = tf.get_variable("bf", [config.hidden_dim], initializer=tf.random_uniform_initializer(-calc_wt_init(config.hidden_dim),calc_wt_init(config.hidden_dim)))#, regularizer=tf.contrib.layers.l2_regularizer(0.0))
-
-
 
             self.observables = tf.placeholder(tf.int32, shape=[None])
             self.flows = tf.placeholder(tf.int32, shape=[None])
@@ -54,10 +53,13 @@ class NarytreeLSTM(object):
 
             self.sentences = tf.placeholder(tf.int32, shape=[None, None])
             self.lengths = tf.placeholder(tf.int32, shape=[None])
+            self.attention = None
 
             self.training_variables = [self.U, self.W, self.b, self.bf]
+
             if config.trainable_embeddings:
-                self.training_variables.append( self.embedding)
+                self.training_variables.append(self.embedding)
+
 
     def get_feed_dict(self, batch_sample, dropout = 1.0):
         #print batch_sample.scatter_in
@@ -90,30 +92,37 @@ class NarytreeLSTM(object):
         _, nodes_h_unscattered = self.get_outputs()
         return nodes_h_unscattered
 
-    def get_sentence_lstm_ouput(self, sentences, lengths):
+    def get_attention(self):
+        return self.attention
 
-        with tf.variable_scope("lstm_attn", reuse=True):
+    def get_sentence_lstm_ouput(self, sentences, lengths, scope):
 
-            sen_embedding = tf.nn.embedding_lookup(self.embedding, sentences)
+        sen_embedding = tf.nn.embedding_lookup(self.embedding, sentences)
+
+        with tf.variable_scope(scope, reuse=True):
             cell = tf.nn.rnn_cell.BasicLSTMCell(self.config.hidden_dim, reuse=tf.AUTO_REUSE)
             outputs, final_state = tf.nn.dynamic_rnn(cell, sen_embedding, lengths, dtype=tf.float32)
             return outputs, final_state
 
     def get_outputs(self):
-        attn_src, _ = self.get_sentence_lstm_ouput(self.sentences, self.lengths)
 
         with tf.variable_scope("Node", reuse=True):
+
             W = tf.get_variable("W", [self.config.emb_dim, self.config.hidden_dim])
             U = tf.get_variable("U", [self.config.hidden_dim * self.config.degree , self.config.hidden_dim * (3 + self.config.degree)])
             b = tf.get_variable("b", [3 * self.config.hidden_dim])
             bf = tf.get_variable("bf", [self.config.hidden_dim])
 
+            attn_src, _ = self.get_sentence_lstm_ouput(self.sentences, self.lengths, "lstm_attn")
+
             nbf = tf.tile(bf, [self.config.degree])
-            # nbf = tf.Print(nbf, [attn_src, tf.shape(attn_src)], "attn_src")
+            # nbf = tf.Print(nbf, [attn_src_l, tf.shape(attn_src_l)], "attn_src_l")
 
             nodes_h_scattered = tf.TensorArray(tf.float32, size=self.tree_height, clear_after_read=False)
             nodes_h = tf.TensorArray(tf.float32, size = self.tree_height, clear_after_read=False)
             nodes_c = tf.TensorArray(tf.float32, size = self.tree_height, clear_after_read=False)
+
+            attn_arr = tf.TensorArray(tf.float32, size = self.tree_height, clear_after_read=False)
 
             const0f = tf.constant([0], dtype=tf.float32)
             idx_var = tf.constant(0, dtype=tf.int32)
@@ -121,7 +130,7 @@ class NarytreeLSTM(object):
             out_shape = tf.stack([-1,self.batch_size, self.config.hidden_dim], 0)
 
 
-            def _recurrence(nodes_h, nodes_c, nodes_h_scattered, idx_var):
+            def _recurrence(nodes_h, nodes_c, nodes_h_scattered, idx_var, attn_arr):
                 out_ = tf.concat([nbf, b], axis=0)
                 idx_var_dim1 = tf.expand_dims(idx_var, 0)
                 prev_idx_var_dim1 = tf.expand_dims(idx_var-1, 0)
@@ -186,13 +195,10 @@ class NarytreeLSTM(object):
                              lambda: const0f
                              )
 
-
                 observable = tf.squeeze(tf.slice(self.observables, observables_indice_begin, observables_size))
 
 
                 input_embed = tf.reshape(tf.nn.embedding_lookup(self.embedding, observable),[-1,self.config.emb_dim])
-
-
 
                 def compute_input():
                     out = tf.matmul(input_embed, W)
@@ -210,13 +216,13 @@ class NarytreeLSTM(object):
                 # out_ = tf.Print(out_, [idx_var, computed_input_val, tf.shape(computed_input_val)], "computed input")
                 out_ += computed_input_val
 
-                def compute_attn_ctx(flat_lstm_attn_source):
+                def compute_attn_ctx(flat_src_l, flat_src_r):
 
-                    def compute(h_child):
+                    def compute(h_child, flat_src):
                         h_child = tf.expand_dims(h_child, axis=1)
-                        matching_score = tf.reduce_sum(h_child * flat_lstm_attn_source, axis=-1)
+                        matching_score = tf.reduce_sum(h_child * flat_src, axis=-1)
                         attn_weights = restricted_softmax_on_sequence(matching_score, tf.shape(self.sentences)[1], self.lengths)
-                        return tf.reduce_sum(flat_lstm_attn_source * tf.expand_dims(attn_weights, axis=-1), axis=1)
+                        return tf.reduce_sum(flat_src * tf.expand_dims(attn_weights, axis=-1), axis=1), attn_weights
 
                     scatter_indice_begin, scatter_indice_size, child_scatters = compute_indices()
 
@@ -232,25 +238,28 @@ class NarytreeLSTM(object):
 
                     hs_left = tf.gather(ks, even_idx)
                     hs_right = tf.gather(ks, odd_idx)
-                    ctx_left, ctx_right = compute(hs_left), compute(hs_right)
+                    ctx_left, attn_weights_l = compute(hs_left, flat_src_l)
+                    ctx_right, attn_weights_r = compute(hs_right, flat_src_r)
 
                     ctx_overall = ctx_left + ctx_right
+                    attn_weights = attn_weights_l + attn_weights_r
 
                     ctx_overall = tf.tile(ctx_overall, [1, 3 + self.config.degree])
 
-                    return ctx_overall
+                    return ctx_overall, attn_weights
 
 
-                attn_ctx = tf.cond(tf.equal(idx_var, self.tree_height - 1),
-                                lambda: compute_attn_ctx(attn_src),
-                                lambda: const0f)
+                attn_ctx, attn_weights = tf.cond(tf.equal(idx_var, self.tree_height - 1),
+                                lambda: compute_attn_ctx(attn_src, attn_src),
+                                lambda: (const0f, tf.zeros((1, tf.reduce_max(self.lengths)))))
 
-                # out_ = tf.Print(out_, [attn_ctx, tf.shape(attn_ctx)], "attn ctx")
+                # out_ = tf.Print(out_, [attn_weights, tf.shape(attn_weights)], "attn weights")
 
                 out_ += attn_ctx
 
-                v = tf.split(out_, 3 + self.config.degree, axis=1)
+                attn_arr = attn_arr.write(idx_var, attn_weights)
 
+                v = tf.split(out_, 3 + self.config.degree, axis=1)
 
                 vf = tf.sigmoid(tf.concat(v[:self.config.degree], axis=1))
 
@@ -262,8 +271,6 @@ class NarytreeLSTM(object):
 
                 h = tf.multiply(tf.sigmoid(v[self.config.degree + 1]),tf.tanh(c))
                 h = tf.nn.dropout(h, self.dropout)
-                slice = tf.slice(self.embedding, [32,0], [1,10])
-                #h = tf.Print(h, [slice], "the DOT embed", 300, 300)
                 nodes_h = nodes_h.write(idx_var, h)
                 nodes_c = nodes_c.write(idx_var, c)
 
@@ -276,24 +283,25 @@ class NarytreeLSTM(object):
                 nodes_h_scattered = nodes_h_scattered.write(idx_var, h)
                 idx_var = tf.add(idx_var, 1)
 
-                return nodes_h, nodes_c, nodes_h_scattered, idx_var
-            loop_cond = lambda x, y, z, id: tf.less(id, self.tree_height)
+                return nodes_h, nodes_c, nodes_h_scattered, idx_var, attn_arr
+            loop_cond = lambda x, y, z, id, attn: tf.less(id, self.tree_height)
 
-            loop_vars = [nodes_h, nodes_c, nodes_h_scattered, idx_var]
-            nodes_h, nodes_c, nodes_h_scattered, idx_var = tf.while_loop(loop_cond, _recurrence, loop_vars,
+            loop_vars = [nodes_h, nodes_c, nodes_h_scattered, idx_var, attn_arr]
+            nodes_h, nodes_c, nodes_h_scattered, idx_var, attn_arr = tf.while_loop(loop_cond, _recurrence, loop_vars,
                                                               parallel_iterations=1)
+
+            self.attention = attn_arr.concat()
+
             return nodes_h_scattered.concat(), nodes_h
 
 
 def restricted_softmax_on_sequence(logits, sentence_length, not_null_count):
     large_neg = (logits * 0) - 100000
     sequence_mask = tf.sequence_mask(tf.cast(not_null_count, dtype=tf.int32), sentence_length)
-    print("seq mask: ", sequence_mask)
     binary_mask = tf.cast(sequence_mask, dtype=tf.float32)
 
     large_neg_on_empty = large_neg * (1 - binary_mask)
 
-    print("bin mask: ", binary_mask)
     return tf.nn.softmax(logits + large_neg_on_empty)
 
 
@@ -317,16 +325,21 @@ class SoftMaxNarytreeLSTM(object):
             self.optimizer = tf.train.AdagradOptimizer(self.config.lr)
             self.embed_optimizer = tf.train.AdagradOptimizer(self.config.emb_lr)
             self.loss = self.get_loss()
-            #self.gv = self.optimizer.compute_gradients(self.loss, self.training_variables)
-            self.gv = zip(tf.gradients(self.loss, self.training_variables),self.training_variables)
             if config.trainable_embeddings:
+                tvars = tf.trainable_variables()
+                # embedding was assumed to be at the last position in the original code in self.training_variables
+                # here we make sure we can identify it for a distinct gradient flow
+                tvars.remove(self.training_variables[-1])
+                tvars.append(self.training_variables[-1])
+                self.gv = zip(tf.gradients(self.loss, self.training_variables),self.training_variables)
                 self.opt = self.optimizer.apply_gradients(self.gv[:-1])
                 self.embed_opt = self.embed_optimizer.apply_gradients(self.gv[-1:])
-            else :
+            else:
                 self.opt = self.optimizer.apply_gradients(self.gv)
                 self.embed_opt = tf.no_op()
 
             self.output = self.get_root_output()
+            self.attention = self.tree_lstm.attention
 
     def get_root_output(self):
         nodes_h = self.tree_lstm.get_output_unscattered()
@@ -334,8 +347,12 @@ class SoftMaxNarytreeLSTM(object):
         out = tf.matmul(roots_h, self.W) + self.b
         return out
 
+
     def get_output(self):
         return self.output
+
+    def get_attention(self):
+        return self.attention
 
     def get_loss(self):
         reg_losses = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)
@@ -435,8 +452,8 @@ class SoftMaxNarytreeLSTM(object):
 def test_softmax_model():
     class Config(object):
         num_emb = 10
-        emb_dim = 3
-        hidden_dim = 1
+        emb_dim = 500
+        hidden_dim = 200
         output_dim = None
         degree = 2
         num_epochs = 3
@@ -447,23 +464,20 @@ def test_softmax_model():
         reg = 0.0001
         fine_grained = False
         trainable_embeddings = True
-        num_labels = 2
+        num_labels = 301
         embeddings = None
 
     tree = BatchTree.empty_tree()
-    tree.root.begin_sentence()
     tree.root.add_sample(-1, 100)
     tree.root.expand_or_add_child(0, 10, 0)
     tree.root.expand_or_add_child(0, 20, 1)
 
-    tree.root.begin_sentence()
     tree.root.add_sample(-1, 200)
     tree.root.expand_or_add_child(-1, 30, 0)
     tree.root.expand_or_add_child(-1, 40, 1)
     tree.root.children[0].expand_or_add_child(0, 1, 0)
     tree.root.children[0].expand_or_add_child(0, 2, 1)
 
-    tree.root.begin_sentence()
     tree.root.add_sample(-1, 300)
     tree.root.expand_or_add_child(-1, 50, 0)
     tree.root.expand_or_add_child(-1, 60, 1)
@@ -472,9 +486,11 @@ def test_softmax_model():
     tree.root.children[1].expand_or_add_child(0, 5, 0)
     tree.root.children[1].expand_or_add_child(0, 6, 1)
 
-    # tree.root.add_sample(1)
-    # labels = np.array([[0, 1]])
     batch_sample = BatchTreeSample(tree)
+
+    all_sen = np.array([[0, 0, 1, 1], [0, 0, 1, 1], [0, 0, 0, 0]])
+    lens = [2, 2, 4]
+    batch_sample.add_batch_sentences(all_sen, lens)
 
     observables, flows, mask, scatter_out, scatter_in, scatter_in_indices, labels, observables_indices, out_indices, childs_transpose_scatter, nodes_count, nodes_count_per_indice = tree.build_batch_tree_sample()
     print observables, "observables"
