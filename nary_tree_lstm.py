@@ -55,6 +55,10 @@ class NarytreeLSTM(object):
             self.lengths = tf.placeholder(tf.int32, shape=[None])
             self.attention = None
 
+            self.batch_tree_idx = tf.placeholder(tf.int32, shape=[None])
+            self.sentence_indices_start = tf.placeholder(tf.int32, shape=[None])
+            self.sentence_indices_end = tf.placeholder(tf.int32, shape=[None])
+
             self.training_variables = [self.U, self.W, self.b, self.bf]
 
             if config.trainable_embeddings:
@@ -81,7 +85,10 @@ class NarytreeLSTM(object):
         self.dropout : dropout,
         self.nodes_count_per_indice : batch_sample.nodes_count_per_indice,
         self.sentences : batch_sample.sentences,
-        self.lengths : batch_sample.sentence_lengths
+        self.lengths : batch_sample.sentence_lengths,
+        self.batch_tree_idx: batch_sample.batch_tree_idx,
+        self.sentence_indices_start: batch_sample.sentence_indices_start,
+        self.sentence_indices_end: batch_sample.sentence_indices_end
         }
 
     def get_output(self):
@@ -218,13 +225,35 @@ class NarytreeLSTM(object):
 
                 def compute_attn_ctx(flat_src_l, flat_src_r):
 
-                    def compute(h_child, flat_src):
+                    def compute(h_child, flat_src, level_sentences, level_sentence_indices):
                         h_child = tf.expand_dims(h_child, axis=1)
                         matching_score = tf.reduce_sum(h_child * flat_src, axis=-1)
-                        attn_weights = restricted_softmax_on_sequence(matching_score, tf.shape(self.sentences)[1], self.lengths)
+                        attn_weights = restricted_softmax_on_sequence_range(matching_score, tf.shape(level_sentences)[1], level_sentence_indices)
                         return tf.reduce_sum(flat_src * tf.expand_dims(attn_weights, axis=-1), axis=1), attn_weights
 
+                    # Get information required to attend over portion of sentence represented by subtree
+                    cur_level_indice_begin, cur_level_indice_end = tf.split(tf.slice(self.out_indices, idx_var_dim1, [2]), 2)
+                    cur_level_indice_size = cur_level_indice_end - cur_level_indice_begin
+
+                    prev_level_indice_begin, prev_level_indice_end = tf.split(tf.slice(self.out_indices, prev_idx_var_dim1, [2]), 2)
+                    prev_level_indice_size = prev_level_indice_end - prev_level_indice_begin
+
+                    level_batch_tree_idx = tf.slice(self.batch_tree_idx, prev_level_indice_begin, prev_level_indice_size)
+                    level_sentence_indices_start = tf.slice(self.sentence_indices_start, cur_level_indice_begin, cur_level_indice_size)
+                    level_sentence_indices_end = tf.slice(self.sentence_indices_end, cur_level_indice_begin, cur_level_indice_size)
+
                     scatter_indice_begin, scatter_indice_size, child_scatters = compute_indices()
+                    scatters_in = tf.slice(self.scatter_in, scatter_indice_begin, scatter_indice_size)
+                    scatters_in = tf.reshape(scatters_in, tf.concat([scatter_indice_size, [-1]], 0))
+
+                    grouped_level_batch_tree_idx = tf.scatter_nd(child_scatters, level_batch_tree_idx,
+                                                                 tf.shape(level_batch_tree_idx), name=None)
+                    grouped_level_sentence_indices_start = tf.expand_dims(tf.gather_nd(level_sentence_indices_start, scatters_in,
+                                                                         name=None), axis=1)
+                    grouped_level_sentence_indices_end = tf.expand_dims(tf.gather_nd(level_sentence_indices_end, scatters_in,
+                                                                         name=None), axis=1)
+
+                    grouped_level_sentence = tf.gather(self.sentences, grouped_level_batch_tree_idx)
 
                     k = nodes_h.read(idx_var - 1)
                     ks = tf.scatter_nd(child_scatters, k, tf.shape(k), name=None)
@@ -238,11 +267,23 @@ class NarytreeLSTM(object):
 
                     hs_left = tf.gather(ks, even_idx)
                     hs_right = tf.gather(ks, odd_idx)
-                    ctx_left, attn_weights_l = compute(hs_left, flat_src_l)
-                    ctx_right, attn_weights_r = compute(hs_right, flat_src_r)
+
+                    grouped_level_sentence_left = tf.gather(grouped_level_sentence, even_idx)
+                    grouped_level_sentence_right = tf.gather(grouped_level_sentence, odd_idx)
+
+                    grouped_level_sentence_indices_left = tf.concat([grouped_level_sentence_indices_start,
+                                                                grouped_level_sentence_indices_end], axis=1)
+                    grouped_level_sentence_indices_right = tf.concat([grouped_level_sentence_indices_start,
+                                                                     grouped_level_sentence_indices_end], axis=1)
+
+                    ctx_left, attn_weights_l = compute(hs_left, flat_src_l,  grouped_level_sentence_left,
+                                                       grouped_level_sentence_indices_left)
+                    ctx_right, attn_weights_r = compute(hs_right, flat_src_r, grouped_level_sentence_right,
+                                                        grouped_level_sentence_indices_right)
 
                     ctx_overall = ctx_left + ctx_right
                     attn_weights = attn_weights_l + attn_weights_r
+                    attn_weights = tf.Print(attn_weights, [grouped_level_sentence_indices_start, grouped_level_sentence_indices_end], message="Attn weights")
 
                     ctx_overall = tf.tile(ctx_overall, [1, 3 + self.config.degree])
 
@@ -295,14 +336,26 @@ class NarytreeLSTM(object):
             return nodes_h_scattered.concat(), nodes_h
 
 
-def restricted_softmax_on_sequence(logits, sentence_length, not_null_count):
+def restricted_softmax_on_sequence_range(logits, sentence_length, inclusive_span_idxs):
     large_neg = (logits * 0) - 100000
-    sequence_mask = tf.sequence_mask(tf.cast(not_null_count, dtype=tf.int32), sentence_length)
-    binary_mask = tf.cast(sequence_mask, dtype=tf.float32)
+    begin = inclusive_span_idxs[:, 0]
+    end = inclusive_span_idxs[:, 1] + 1
+
+    sequence_mask_begin = tf.sequence_mask(begin, sentence_length)
+    inverted_begin = tf.logical_not(sequence_mask_begin)
+    sequence_mask_end = tf.sequence_mask(end, sentence_length)
+
+    range_mask = tf.logical_and(sequence_mask_end, inverted_begin)
+    binary_mask = tf.cast(range_mask, dtype=tf.float32)
 
     large_neg_on_empty = large_neg * (1 - binary_mask)
-
     return tf.nn.softmax(logits + large_neg_on_empty)
+
+def duplicate_element(self, input_t, times):
+    """
+    Eg. input: [8,9], times: 2, output: [8, 8, 9, 9]
+    """
+    return tf.reshape(tf.stack([input_t] * times, axis=1), [-1])
 
 
 class SoftMaxNarytreeLSTM(object):
@@ -331,7 +384,7 @@ class SoftMaxNarytreeLSTM(object):
                 # here we make sure we can identify it for a distinct gradient flow
                 tvars.remove(self.training_variables[-1])
                 tvars.append(self.training_variables[-1])
-                self.gv = zip(tf.gradients(self.loss, self.training_variables),self.training_variables)
+                self.gv = zip(tf.gradients(self.loss, tvars), tvars)
                 self.opt = self.optimizer.apply_gradients(self.gv[:-1])
                 self.embed_opt = self.embed_optimizer.apply_gradients(self.gv[-1:])
             else:

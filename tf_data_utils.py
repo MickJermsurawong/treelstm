@@ -240,13 +240,20 @@ def extract_tree_data(tree,max_degree=2,only_leaves_have_vals=True,with_labels=F
                np.array(tree_str,dtype='int32'))
 
 def build_batch_trees(trees, mini_batch_size):
-    def expand_batch_with_sample(batch_node, sample_node):
+    def expand_batch_with_sample(batch_node, sample_node, tree_idx):
         if batch_node.parent is None: # root
-            batch_node.add_sample(-1 if sample_node.word is None else sample_node.word, tree.label)
+            batch_node.add_sample(-1 if sample_node.word is None else sample_node.word, tree.label, tree_idx)
         for child in zip(range(len(sample_node.children)),sample_node.children): # iterate over direct children, [(0, child0), (1, child1), ...]
-            batch_node.expand_or_add_child(child[1].word, child[1].label, child[0])
+            batch_node.expand_or_add_child(child[1].word, child[1].label, child[0], tree_idx)
         for children in zip(batch_node.children, sample_node.children): # Recursive function call
-            expand_batch_with_sample(children[0], children[1])
+            expand_batch_with_sample(children[0], children[1], tree_idx)
+
+        if not sample_node.children: # If leaf node, represents a word
+            batch_node.sentence_indices_start.append(sample_node.idx)
+            batch_node.sentence_indices_end.append(sample_node.idx)
+        else:
+            batch_node.sentence_indices_start.append(batch_node.children[0].sentence_indices_start[-1])
+            batch_node.sentence_indices_end.append(batch_node.children[-1].sentence_indices_end[-1])
 
     batches = []
     while(len(trees)>0):
@@ -256,8 +263,8 @@ def build_batch_trees(trees, mini_batch_size):
 
         batch_sentences = []
 
-        for tree in batch:
-            expand_batch_with_sample(batch_tree.root, tree)
+        for idx, tree in enumerate(batch):
+            expand_batch_with_sample(batch_tree.root, tree, idx)
             sentence = extract_sentence(tree)
             batch_sentences.append(sentence)
         batch_sentences, lens = fill_data(batch_sentences)
