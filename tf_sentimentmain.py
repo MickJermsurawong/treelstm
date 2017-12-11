@@ -25,7 +25,7 @@ class Config(object):
     output_dim=None
     degree = 2
     num_labels = 3
-    num_epochs = 50
+    num_epochs = 30
 
 
     maxseqlen = None
@@ -108,88 +108,96 @@ def train2():
     config.num_emb = num_emb
     config.output_dim = num_labels
 
-    # return
-    random.seed()
-    np.random.seed()
+    # The colors of the different iterations
+    plot_color = ['r', 'g', 'b']
 
-    from random import shuffle
-    shuffle(train_set)
-    train_set = utils.build_labelized_batch_trees(train_set, config.batch_size)
-    dev_set = utils.build_labelized_batch_trees(dev_set, 500)
-    test_set = utils.build_labelized_batch_trees(test_set, 500)
+    # Overlay 3 plots into the subplots
+    for i in range(3):
+        train_set, dev_set, test_set = data['train'], data['dev'], data['test']
 
-    with tf.Graph().as_default():
+        # return
+        random.seed()
+        np.random.seed()
 
-        #model = tf_seq_lstm.tf_seqLSTM(config)
-        model = nary_tree_lstm.SoftMaxNarytreeLSTM(config)
+        from random import shuffle
+        shuffle(train_set)
+        train_set = utils.build_labelized_batch_trees(train_set, config.batch_size)
+        dev_set = utils.build_labelized_batch_trees(dev_set, 500)
+        test_set = utils.build_labelized_batch_trees(test_set, 500)
 
-        init=tf.global_variables_initializer()
-        best_valid_score=0.0
-        best_valid_epoch=0
-        dev_score=0.0
-        test_score=0.0
+        with tf.Graph().as_default():
 
-        dev_score_array = []
-        test_score_array = []
-        loss_array = []
-        with tf.Session() as sess:
+            #model = tf_seq_lstm.tf_seqLSTM(config)
+            model = nary_tree_lstm.SoftMaxNarytreeLSTM(config)
 
-            sess.run(init)
+            init=tf.global_variables_initializer()
+            best_valid_score=0.0
+            best_valid_epoch=0
+            dev_score=0.0
+            test_score=0.0
 
+            dev_score_array = []
+            test_score_array = []
+            loss_array = []
+            with tf.Session() as sess:
+                sess.run(init)
 
-            for epoch in range(config.num_epochs):
-                start_time = time.time()
-                print 'epoch', epoch
-                avg_loss=0.0
-                avg_loss = model.train_epoch(train_set[:],sess)
-                loss_array.append(avg_loss)
+                for epoch in range(config.num_epochs):
+                    start_time = time.time()
+                    print 'epoch', epoch
+                    avg_loss=0.0
+                    avg_loss = model.train_epoch(train_set[:],sess)
+                    loss_array.append(avg_loss)
 
-                print "Training time per epoch is {0}".format(
-                    time.time() - start_time)
+                    print "Training time per epoch is {0}".format(
+                        time.time() - start_time)
 
-                print 'validation score'
-                score = test(model,dev_set,sess)
-                dev_score_array.append(score)
-                #print 'train score'
-                #test(model, train_set[:40], sess)
-                if score >= best_valid_score:
-                    best_valid_score = score
-                    best_valid_epoch = epoch
-                    test_score = test(model,test_set,sess)
-                    test_score_array.append(test_score)
-                else:
-                    test_score = test(model,test_set,sess)
-                    test_score_array.append(test_score)
-                print 'test score :', test_score, 'updated', epoch - best_valid_epoch, 'epochs ago with validation score', best_valid_score
-
-                if config.plot:
-                    plt.subplot(1,3,1)
-                    plt.plot(range(epoch+1), loss_array)
-                    plt.ylabel("Average Loss")
-                    plt.xlabel("Epochs")
-
-                    plt.subplot(1, 3, 2)
-                    plt.plot(range(epoch+1), dev_score_array)
-                    plt.ylabel("Dev Score")
-                    plt.xlabel("Epochs")
-
-                    plt.subplot(1, 3, 3)
-                    plt.plot(range(epoch+1), test_score_array)
-                    plt.ylabel("Test Score")
-                    plt.xlabel("Epochs")
-
-                    if config.ancestral:
-                        if config.fine_grained:
-                            plt.savefig("Ancestral-Optimized-Fine-Grained.png")
-                        else:
-                            plt.savefig("Ancestral-Optimized-Binary.png")
+                    print 'validation score'
+                    score = test(model,dev_set,sess)
+                    dev_score_array.append(score)
+                    #print 'train score'
+                    #test(model, train_set[:40], sess)
+                    if score >= best_valid_score:
+                        best_valid_score = score
+                        best_valid_epoch = epoch
+                        test_score = test(model,test_set,sess)
+                        test_score_array.append(test_score)
                     else:
-                        if config.fine_grained:
-                            plt.savefig("Optimized-Fine-Grained.png")
+                        test_score = test(model,test_set,sess)
+                        test_score_array.append(test_score)
+                    print 'test score :', test_score, 'updated', epoch - best_valid_epoch, 'epochs ago with validation score', best_valid_score
+
+                    if config.plot:
+                        plt.subplot(1,3,1)
+                        plt.plot(range(epoch+1), loss_array, color=plot_color[i])
+                        plt.ylabel("Average Loss")
+                        plt.xlabel("Epochs")
+
+                        plt.subplot(1, 3, 2)
+                        plt.plot(range(epoch+1), dev_score_array, color=plot_color[i])
+                        plt.ylabel("Dev Score")
+                        plt.xlabel("Epochs")
+
+                        plt.subplot(1, 3, 3)
+                        plt.plot(range(epoch+1), test_score_array, color=plot_color[i])
+                        plt.ylabel("Test Score")
+                        plt.xlabel("Epochs")
+
+                        plt.tight_layout()
+
+                        if config.ancestral:
+                            if config.fine_grained:
+                                plt.savefig("Ancestral-Optimized-Fine-Grained.png")
+                            else:
+                                plt.savefig("Ancestral-Optimized-Binary.png")
                         else:
-                            plt.savefig("Optimized-Binary.png")
+                            if config.fine_grained:
+                                plt.savefig("Optimized-Fine-Grained.png")
+                            else:
+                                plt.savefig("Optimized-Binary.png")
 
-
+        # Overlay the subplots
+        plt.hold(True)
 
 def train(restore=False):
 
