@@ -42,7 +42,7 @@ def train2():
 
     config = Config()
     config.batch_size = 25
-    config.lr = 0.1
+    config.lr = 0.05
     config.dropout = 0.5
     config.reg = 0.0001
     config.emb_lr = 0.02

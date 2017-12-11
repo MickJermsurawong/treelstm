@@ -29,10 +29,8 @@ class NarytreeLSTM(object):
                                regularizer=tf.contrib.layers.l2_regularizer(self.config.reg)
                                ):
 
-
-
             self.U = tf.get_variable("U", [config.hidden_dim * config.degree , config.hidden_dim * (3 + config.degree)], initializer=tf.random_uniform_initializer(-calc_wt_init(config.hidden_dim),calc_wt_init(config.hidden_dim)))
-            self.W = tf.get_variable("W", [config.emb_dim, config.hidden_dim], initializer=tf.random_uniform_initializer(-calc_wt_init(config.emb_dim),calc_wt_init(config.emb_dim)))
+            self.W = tf.get_variable("W", [config.emb_dim + config.hidden_dim, config.hidden_dim], initializer=tf.random_uniform_initializer(-calc_wt_init(config.emb_dim),calc_wt_init(config.emb_dim)))
             self.b = tf.get_variable("b", [config.hidden_dim*3], initializer=tf.random_uniform_initializer(-calc_wt_init(config.hidden_dim),calc_wt_init(config.hidden_dim)))#, regularizer=tf.contrib.layers.l2_regularizer(0.0))
             self.bf = tf.get_variable("bf", [config.hidden_dim], initializer=tf.random_uniform_initializer(-calc_wt_init(config.hidden_dim),calc_wt_init(config.hidden_dim)))#, regularizer=tf.contrib.layers.l2_regularizer(0.0))
 
@@ -103,31 +101,29 @@ class NarytreeLSTM(object):
         sen_embedding = tf.nn.embedding_lookup(self.embedding, sentences)
 
         with tf.variable_scope(scope, reuse=True):
-
             cell = tf.nn.rnn_cell.BasicLSTMCell(self.config.hidden_dim, reuse=tf.AUTO_REUSE)
             if is_bidirectional:
                 cell_bw = tf.nn.rnn_cell.BasicLSTMCell(self.config.hidden_dim, reuse=tf.AUTO_REUSE)
                 bi_lstm_output, final_state = tf.nn.bidirectional_dynamic_rnn(cell, cell_bw, sen_embedding,
                                                                               sequence_length=lengths, dtype=tf.float32)
-                outputs = tf.concat([bi_lstm_output[0], bi_lstm_output[1]], axis=2)
-                outputs = tf.layers.dense(outputs, self.config.hidden_dim, name="lstm-output-proj",
-                                          kernel_initializer=tf.random_uniform_initializer(-calc_wt_init(self.config.hidden_dim),
-                                                                                           calc_wt_init(self.config.hidden_dim)),
-                                          reuse=tf.AUTO_REUSE)
+                return bi_lstm_output[0], bi_lstm_output[1]
+
             else:
-                outputs, final_state = tf.nn.dynamic_rnn(cell, sen_embedding, lengths, dtype=tf.float32)
-            return outputs, final_state
+                outputs, _ = tf.nn.dynamic_rnn(cell, sen_embedding, lengths, dtype=tf.float32)
+                return outputs, outputs
 
     def get_outputs(self):
 
         with tf.variable_scope("Node", reuse=True):
 
-            W = tf.get_variable("W", [self.config.emb_dim, self.config.hidden_dim])
+            W = tf.get_variable("W", [self.config.emb_dim + self.config.hidden_dim, self.config.hidden_dim])
             U = tf.get_variable("U", [self.config.hidden_dim * self.config.degree , self.config.hidden_dim * (3 + self.config.degree)])
             b = tf.get_variable("b", [3 * self.config.hidden_dim])
             bf = tf.get_variable("bf", [self.config.hidden_dim])
 
-            attn_src, _ = self.get_sentence_lstm_ouput(self.sentences, self.lengths, "lstm_attn", is_bidirectional=True)
+            max_sentence_len = tf.reduce_max(self.lengths)
+
+            attn_fw, attn_bw = self.get_sentence_lstm_ouput(self.sentences, self.lengths, "lstm_attn", is_bidirectional=True)
 
             nbf = tf.tile(bf, [self.config.degree])
             nbf = tf.Print(nbf, [self.span_idxs], "span_idxs")
@@ -215,7 +211,9 @@ class NarytreeLSTM(object):
                 input_embed = tf.reshape(tf.nn.embedding_lookup(self.embedding, observable),[-1,self.config.emb_dim])
 
                 def compute_input():
-                    out = tf.matmul(input_embed, W)
+
+                    input_embed_padded = tf.pad(input_embed, [[0, 0], [0, self.config.hidden_dim]], "CONSTANT")
+                    out = tf.matmul(input_embed_padded, W)
 
                     input_scatter = tf.slice(self.input_scatter, observables_indice_begin, observables_size)
                     input_scatter = tf.reshape(input_scatter, tf.concat([observables_size, [-1]], 0))
@@ -231,7 +229,7 @@ class NarytreeLSTM(object):
 
                 def compute_attn_ctx(flat_src_l, flat_src_r):
 
-                    def compute(h_child, flat_src, length):
+                    def compute(h_child, flat_src, span, is_left, is_dot_product=True):
                         """
                         Compute context and attention weights. Note that flat source here needs not be unique, because hidden state of child at the same level can come from the same tree.
                         :param h_child: hidden child state in batch [num_child, hidden_dim]
@@ -244,12 +242,23 @@ class NarytreeLSTM(object):
                         # https://github.com/tensorflow/nmt#background-on-the-attention-mechanism
 
                         h_child = tf.reshape(h_child, [-1, self.config.hidden_dim])
-                        child_proj = tf.layers.dense(h_child, self.config.hidden_dim, name="child_attn-proj", reuse=tf.AUTO_REUSE)
-                        child_proj = tf.expand_dims(child_proj, axis=1)
+                        h_child = tf.expand_dims(h_child, axis=1)
 
-                        matching_score = tf.squeeze(tf.layers.dense(tf.nn.tanh(child_proj + flat_src), 1, name="attn_score", reuse=tf.AUTO_REUSE), axis=-1)
-                        attn_ws = restricted_softmax_on_sequence(matching_score, tf.shape(self.sentences)[1], length)
+                        if is_left:
+                            flat_src = tf.layers.dense(flat_src, self.config.hidden_dim, name="attn_src_proj_left", reuse=tf.AUTO_REUSE)
+                        else:
+                            flat_src = tf.layers.dense(flat_src, self.config.hidden_dim, name="attn_src_proj_right", reuse=tf.AUTO_REUSE)
 
+                        if is_dot_product:
+                            print("Using dot product for matching score...")
+                            matching_score = tf.reduce_sum(h_child * flat_src, axis=-1)
+                        else:
+                            print("Using additive for matching score...")
+                            h_child = tf.layers.dense(h_child, self.config.hidden_dim, name="attn_child_proj", reuse=tf.AUTO_REUSE, use_bias=False)
+                            matching_score = tf.nn.dropout(tf.nn.relu(h_child + flat_src), self.dropout)
+                            matching_score = tf.squeeze(tf.layers.dense(matching_score, 1, name="attn_score", reuse=tf.AUTO_REUSE), axis=-1)
+
+                        attn_ws = restricted_softmax_on_sequence_range(matching_score, tf.shape(self.sentences)[1], span)
                         context = tf.reduce_sum(flat_src * tf.expand_dims(attn_ws, axis=-1), axis=1)
                         return context, attn_ws
 
@@ -278,29 +287,41 @@ class NarytreeLSTM(object):
 
                     # extract the sentences for the level
                     flat_src_l = tf.gather(flat_src_l, idx_left)
-                    len_l = tf.gather(self.lengths, idx_left)
                     flat_src_r = tf.gather(flat_src_r, idx_right)
-                    len_r = tf.gather(self.lengths, idx_right)
+
+                    # create span indices of children
+                    # nbf = tf.Print(nbf, [self.span_idxs], "span_idxs")
+                    zero_expanded = tf.expand_dims(tf.constant(0), axis=0)
+                    two_expanded = tf.expand_dims(tf.constant(2), axis=0)
+                    span_in_batch = tf.slice(self.span_idxs, tf.concat([level_indice_begin, zero_expanded], axis=0), tf.concat([level_indice_size, two_expanded], axis=0))
+                    span_idx_in_pairs = tf.scatter_nd(child_scatters, span_in_batch, tf.shape(span_in_batch), name="span_idx_batch_to_pairs")
+                    span_left = tf.gather(span_idx_in_pairs, even_idx)
+                    span_right = tf.gather(span_idx_in_pairs, odd_idx)
+                    # span_left = tf.Print(span_left, [idx_var, tf.shape(span_left), tf.shape(span_right)], "span left/right", 300)
 
                     # compute ctx and attn
-                    ctx_left, attn_weights_l = compute(child_h_left, flat_src_l, len_l)
-                    ctx_right, attn_weights_r = compute(child_h_right, flat_src_r, len_r)
+                    ctx_left, attn_weights_l = compute(child_h_left, flat_src_l, span_right, is_left=True)
+                    ctx_right, attn_weights_r = compute(child_h_right, flat_src_r, span_left, is_left=False)
 
+                    # combine context and put in input format, pre-padding size of original embedding dim
                     ctx_overall = ctx_left + ctx_right
+                    ctx_overall = tf.pad(ctx_overall, [[0, 0], [self.config.emb_dim, 0]], "CONSTANT")
+                    ctx_overall = tf.matmul(ctx_overall, W)
+
                     attn_w_level = attn_weights_l + attn_weights_r
 
                     ctx_overall = tf.tile(ctx_overall, [1, 3 + self.config.degree])
 
+                    # project to input format of current level
                     scatters_in = tf.slice(self.scatter_in, scatter_indice_begin, scatter_indice_size)
                     scatters_in = tf.reshape(scatters_in, tf.concat([scatter_indice_size, [-1]], 0))
                     ctx_overall = tf.scatter_nd(scatters_in, ctx_overall, u_scatter_shape, name=None)
 
                     return ctx_overall, attn_w_level
 
-
                 attn_ctx, attn_weights = tf.cond(tf.less(0, idx_var),
-                                lambda: compute_attn_ctx(attn_src, attn_src),
-                                lambda: (const0f, tf.zeros((1, tf.reduce_max(self.lengths)))))
+                                                 lambda: compute_attn_ctx(attn_bw, attn_fw),
+                                                 lambda: (const0f, tf.zeros((1, max_sentence_len))))
 
                 # out_ = tf.Print(out_, [attn_weights, tf.shape(attn_weights)], "attn weights")
 
@@ -345,12 +366,34 @@ class NarytreeLSTM(object):
 
 
 def restricted_softmax_on_sequence(logits, sentence_length, not_null_count):
-    large_neg = (logits * 0) - 100000
     sequence_mask = tf.sequence_mask(tf.cast(not_null_count, dtype=tf.int32), sentence_length)
     binary_mask = tf.cast(sequence_mask, dtype=tf.float32)
+    return restricted_softmax_on_mask(logits, binary_mask)
 
+
+def restricted_softmax_on_sequence_range(logits, max_sen_length, inclusive_ranges):
+    """
+    :param logits: logits
+    :param max_sen_length: max sentence length
+    :param inclusive_ranges: [batch_size, 2] tensors, last dim corresponds to start and end.
+    :return:
+    """
+    begin = inclusive_ranges[:, 0]
+    end = inclusive_ranges[:, 1] + 1
+
+    sequence_mask_begin = tf.sequence_mask(begin, max_sen_length)
+    inverted_begin = tf.logical_not(sequence_mask_begin)
+    sequence_mask_end = tf.sequence_mask(end, max_sen_length)
+
+    range_mask = tf.logical_and(sequence_mask_end, inverted_begin)
+    binary_mask = tf.cast(range_mask, dtype=tf.float32)
+
+    return restricted_softmax_on_mask(logits, binary_mask)
+
+
+def restricted_softmax_on_mask(logits, binary_mask):
+    large_neg = (logits * 0) - 100000
     large_neg_on_empty = large_neg * (1 - binary_mask)
-
     return tf.nn.softmax(logits + large_neg_on_empty)
 
 
