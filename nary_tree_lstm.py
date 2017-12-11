@@ -112,6 +112,20 @@ class NarytreeLSTM(object):
                 outputs, _ = tf.nn.dynamic_rnn(cell, sen_embedding, lengths, dtype=tf.float32)
                 return outputs, outputs
 
+    def get_sentence_cnn_output(self, sentences, not_null_count, max_length):
+        sentences = tf.nn.embedding_lookup(self.embedding, sentences)
+
+        with tf.variable_scope("cnn_sentence", reuse=tf.AUTO_REUSE):
+            not_null_mask = tf.expand_dims(tf.cast(tf.sequence_mask(not_null_count, max_length), dtype=tf.float32), axis=-1)
+            sentences *= not_null_mask
+            out = tf.nn.relu(atrous_conv1d(sentences, self.config.emb_dim, self.config.emb_dim, filter_width=2, dilation=1, scope="cnn_layer1"))
+            out *= not_null_mask
+            out = tf.nn.relu(atrous_conv1d(out, self.config.emb_dim, self.config.emb_dim, filter_width=2, dilation=2, scope="cnn_layer2"))
+            out *= not_null_mask
+            out = atrous_conv1d(out, self.config.emb_dim, self.config.hidden_dim, filter_width=2, dilation=4, scope="cnn_layer3")
+            out *= not_null_mask
+            return out, out
+
     def get_outputs(self):
 
         with tf.variable_scope("Node", reuse=True):
@@ -124,6 +138,7 @@ class NarytreeLSTM(object):
             max_sentence_len = tf.reduce_max(self.lengths)
 
             attn_fw, attn_bw = self.get_sentence_lstm_ouput(self.sentences, self.lengths, "lstm_attn", is_bidirectional=True)
+            # attn_fw, attn_bw = self.get_sentence_cnn_output(self.sentences, self.lengths, max_sentence_len)
 
             nbf = tf.tile(bf, [self.config.degree])
 
@@ -438,6 +453,28 @@ def build_mlp(
         prev_layer = tf.nn.dropout(prev_layer, drop_out)
         return tf.layers.dense(inputs=prev_layer, units=output_size, activation=output_activation)
 
+
+def atrous_conv1d(text, text_dim, output_dim, filter_width, dilation, scope):
+    """
+    :param text: A tensor of embedded tokens with shape [batch_size,max_length,embedding_size]
+    :param text_dim: The number of feature maps we'd like to calculate
+    :param filter_width: filter width
+    :param dilation: dilation rate
+    :return: A tensor of the concolved input with shape [batch_size,max_length,output_size]
+    """
+
+    with tf.variable_scope(scope, reuse=tf.AUTO_REUSE):
+
+        text = tf.expand_dims(text, axis=1)
+        shape = [1, filter_width, text_dim, output_dim]
+        filter_var = tf.get_variable("conv_filter", shape=shape)
+
+        convolved = tf.nn.atrous_conv2d(text, filters=filter_var, rate=dilation, padding="SAME")
+        result = tf.squeeze(convolved, axis=1)
+        return result
+
+
+
 class SoftMaxNarytreeLSTM(object):
 
     def __init__(self, config):
@@ -479,7 +516,6 @@ class SoftMaxNarytreeLSTM(object):
         roots_h = nodes_h.read(nodes_h.size()-1)
         out = tf.matmul(roots_h, self.W) + self.b
         return out
-
 
     def get_output(self):
         return self.output
