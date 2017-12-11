@@ -74,14 +74,15 @@ def train2():
             feed_dict = {model.labels: batch[0].root_labels}
             feed_dict.update(model.tree_lstm.get_feed_dict(batch[0]))
             y_pred_, attn_ = session.run([y_pred, attn], feed_dict=feed_dict)
+            y_pred_ = np.argmax(y_pred_[:,relevant_labels], axis=1)
 
-            # attention
+            # display results
             batch_size = len(batch[0].sentences)
             root_attn = attn_[-batch_size:]
+            chosen_sentence = [0, np.random.randint(1, batch_size)]
             if examine_attn:
-                examine_attn(batch[0].sentences, batch[0].sentence_lengths, root_attn)
+                examine_attn(batch[0].sentences, batch[0].sentence_lengths, root_attn, (y_true, y_pred_), chosen_sentence)
 
-            y_pred_ = np.argmax(y_pred_[:,relevant_labels], axis=1)
             ys_true += y_true.tolist()
             ys_pred += y_pred_.tolist()
         ys_true = list(ys_true)
@@ -94,18 +95,25 @@ def train2():
         print metrics.confusion_matrix(ys_true, ys_pred)
         return score
 
-    def visualize_attn(sentence_word_ids, lengths, attention, vocab):
+    def visualize_attn(sentence_word_ids, lengths, attention, ground_truth_and_preds, vocab, index=None):
 
         assert len(lengths) == len(sentence_word_ids)
         assert len(sentence_word_ids) == len(attention)
 
-        words_batch = [[vocab.decode(c_id) for c_id in sen[:l]] for (sen, l) in zip(sentence_word_ids, lengths)]
+        if index is None:
+            index = np.random.randint(0, len(sentence_word_ids), 2)
 
-        chosen_w = words_batch[0]
-        chosen_a = attention[0]
-        for (w, a) in zip (chosen_w, chosen_a):
-            print("{:<15} {}".format(w, a))
-        print("------")
+        chosen_batch_w = [[vocab.decode(c_id) for c_id in sen[:l]] for (sen, l) in zip(sentence_word_ids[index], lengths[index])]
+        chosen_batch_a = attention[index]
+
+        ground_truth, predicted = ground_truth_and_preds[0], ground_truth_and_preds[1]
+        ground_truth, predicted = ground_truth[index], predicted[index]
+
+        for (chosen_w, chosen_a, g, p) in zip(chosen_batch_w, chosen_batch_a, ground_truth, predicted):
+            print("{} | G/P: {}/{}".format(g == p, g, p))
+            for (w, a) in zip (chosen_w, chosen_a):
+                print("{:<15} {}".format(w, a))
+            print("------")
 
     data, vocab = utils.load_sentiment_treebank(DIR, GLOVE_DIR, config.fine_grained)
    # data, vocab = utils.load_sentiment_treebank(DIR, None, config.fine_grained)
@@ -171,14 +179,14 @@ def train2():
                     start_time = time.time()
                     print 'epoch', epoch
                     avg_loss=0.0
-                    avg_loss = model.train_epoch(train_set[:],sess)
+                    avg_loss = model.train_epoch(train_set,sess)
                     loss_array.append(avg_loss)
 
                     print "Training time per epoch is {0}".format(
                         time.time() - start_time)
 
                     print 'validation score'
-                    score = test(model,dev_set,sess)
+                    score = test(model, dev_set, sess, lambda sen, len, attn, g_p, idxs: visualize_attn(sen, len, attn, g_p, vocab, idxs))
                     dev_score_array.append(score)
                     #print 'train score'
                     #test(model, train_set[:40], sess)
