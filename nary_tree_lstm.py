@@ -255,6 +255,9 @@ class NarytreeLSTM(object):
 
                         with tf.variable_scope(scope, reuse=tf.AUTO_REUSE):
 
+                            h_child = tf.nn.dropout(h_child, self.dropout)
+                            flat_src = tf.nn.dropout(flat_src, self.dropout)
+
                             h_child = tf.reshape(h_child, [-1, self.config.hidden_dim])
                             h_child = tf.expand_dims(h_child, axis=1)
 
@@ -338,6 +341,7 @@ class NarytreeLSTM(object):
 
                     # combine context and put in input format, pre-padding size of original embedding dim
                     ctx_overall = tf.concat([ctx_left, ctx_right], axis=-1)
+                    ctx_overall = tf.nn.dropout(ctx_overall, self.dropout)
                     ctx_overall = tf.pad(ctx_overall, [[0, 0], [self.config.emb_dim, 0]], "CONSTANT")
                     ctx_overall = tf.matmul(ctx_overall, W)
 
