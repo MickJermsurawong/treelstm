@@ -154,7 +154,7 @@ class NarytreeLSTM(object):
             hidden_shape = tf.constant([-1, self.config.hidden_dim * self.config.degree], dtype=tf.int32)
             out_shape = tf.stack([-1,self.batch_size, self.config.hidden_dim], 0)
 
-            def _recurrence(nodes_h, nodes_c, nodes_h_scattered, idx_var, attn_arr):
+            def _recurrence(nodes_h, nodes_c, nodes_h_scattered, idx_var, attn_arr, attention_place='ROOT'):
                 out_ = tf.concat([nbf, b], axis=0)
                 idx_var_dim1 = tf.expand_dims(idx_var, 0)
                 prev_idx_var_dim1 = tf.expand_dims(idx_var-1, 0)
@@ -379,7 +379,12 @@ class NarytreeLSTM(object):
 
                     return ctx_overall, attn_w_level
 
-                attn_ctx, attn_weights = tf.cond(tf.less(0, idx_var),
+                if attention_place == 'ROOT':
+                    attention_cond = tf.equal(self.tree_height - 1, idx_var)
+                elif attention_place == 'ALL':
+                    attention_cond = tf.less(0, idx_var)
+
+                attn_ctx, attn_weights = tf.cond(attention_cond,
                                                  lambda: compute_attn_ctx(attn_bw, attn_fw),
                                                  lambda: (const0f, tf.zeros((1, max_sentence_len))))
 
