@@ -241,14 +241,16 @@ class NarytreeLSTM(object):
 
                 out_ += computed_input_val
 
-                def compute_attn_ctx(flat_src_l, flat_src_r):
+                def compute_attn_ctx(flat_src_l, flat_src_r, span_scheme='PARENT'):
 
-                    def compute(h_child, flat_src, span, is_left, matching_scheme='DOT_PROD'):
+                    def compute(h_child, flat_src, span, is_left, matching_scheme='MLP'):
                         """
                         Compute context and attention weights. Note that flat source here needs not be unique, because hidden state of child at the same level can come from the same tree.
                         :param h_child: hidden child state in batch [num_child, hidden_dim]
                         :param flat_src: flat sentence source where the order does correspond with the order of h_child
                         :param span: start and begin of each sub-sentence of the flat source
+                        :param is_left: whether compute attention of left child
+                        :param matching_scheme: scheme to compute matching score
                         :return: context and attention weights
                         """
                         scope = "attn_left" if is_left else "attn_right"
@@ -285,7 +287,7 @@ class NarytreeLSTM(object):
                                 matching_score = build_mlp(
                                     input=tf.concat([h_child, flat_src_r], axis=-1),
                                     output_size=1,
-                                    drop_out=self.dropout,
+                                    drop_out=1,
                                     scope="matching_mlp",
                                     n_layers=2,
                                     sizes=[4, 4],
@@ -325,15 +327,36 @@ class NarytreeLSTM(object):
                     flat_src_l = tf.gather(flat_src_l, idx_left)
                     flat_src_r = tf.gather(flat_src_r, idx_right)
 
-                    # create span indices of children
+                    # create span indices
                     # nbf = tf.Print(nbf, [self.span_idxs], "span_idxs")
                     zero_expanded = tf.expand_dims(tf.constant(0), axis=0)
                     two_expanded = tf.expand_dims(tf.constant(2), axis=0)
                     span_in_batch = tf.slice(self.span_idxs, tf.concat([level_indice_begin, zero_expanded], axis=0), tf.concat([level_indice_size, two_expanded], axis=0))
                     span_idx_in_pairs = tf.scatter_nd(child_scatters, span_in_batch, tf.shape(span_in_batch), name="span_idx_batch_to_pairs")
-                    span_left = tf.gather(span_idx_in_pairs, even_idx)
-                    span_right = tf.gather(span_idx_in_pairs, odd_idx)
-                    # span_left = tf.Print(span_left, [idx_var, tf.shape(span_left), tf.shape(span_right)], "span left/right", 300)
+
+                    if span_scheme == 'PARENT':
+                        span_left = tf.gather(span_idx_in_pairs, even_idx)
+                        span_right = tf.gather(span_idx_in_pairs, odd_idx)
+
+                        span_left_left = tf.expand_dims(span_left[:, 0], axis=-1)
+                        span_right_right = tf.expand_dims(span_right[:, 1], axis=-1)
+
+                        parent_span = tf.concat([span_left_left, span_right_right], axis=-1)
+
+                        span_left = parent_span
+                        span_right = parent_span
+
+                    elif span_scheme == 'SIBLING':
+                        span_left = tf.gather(span_idx_in_pairs, even_idx)
+                        span_right = tf.gather(span_idx_in_pairs, odd_idx)
+
+                    elif span_scheme == 'ALL':
+                        length_inclusive = self.lengths - 1
+                        sentence_span = tf.pad(length_inclusive, tf.constant([[0, 0], [1, 0]]), 'CONSTANT')
+                        span_left = sentence_span
+                        span_right = sentence_span
+                    else:
+                        raise Exception("Unknown span scheme")
 
                     # compute ctx and attn
                     ctx_left, attn_weights_l = compute(child_h_left, flat_src_l, span_right, is_left=True)
