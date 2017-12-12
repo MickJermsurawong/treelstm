@@ -38,6 +38,14 @@ class Config(object):
 
     plot=False
 
+    # ["PARENT", "SIBLING", "ALL"]
+    span_scheme = "ALL"
+    # ["DOT_PROD", "ADDITIVE", "MLP"]
+    matching_scheme = "MLP"
+    # ["ALL", "ROOT"]
+    attn_place = "ALL"
+
+
 def train2():
 
     config = Config()
@@ -48,6 +56,11 @@ def train2():
     config.emb_lr = 0.02
     config.fine_grained = True
     config.plot = True
+
+    config.span_scheme = "ALL"
+    config.matching_scheme = "MLP"
+    config.attn_place = "ALL"
+
 
     import collections
     import numpy as np
@@ -255,7 +268,6 @@ def train(restore=False):
     config.emb_lr = 0.1
     config.ancestral = False
     config.plot = True
-
 
     train_set, dev_set, test_set = data['train'], data['dev'], data['test']
     print 'train', len(train_set)

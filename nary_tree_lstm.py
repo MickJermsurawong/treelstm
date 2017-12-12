@@ -10,6 +10,7 @@ def calc_wt_init(fan_in=300):
     return eps
 
 class NarytreeLSTM(object):
+
     def __init__(self, config=None):
         self.config = config
 
@@ -154,7 +155,7 @@ class NarytreeLSTM(object):
             hidden_shape = tf.constant([-1, self.config.hidden_dim * self.config.degree], dtype=tf.int32)
             out_shape = tf.stack([-1,self.batch_size, self.config.hidden_dim], 0)
 
-            def _recurrence(nodes_h, nodes_c, nodes_h_scattered, idx_var, attn_arr, attention_place='ROOT'):
+            def _recurrence(nodes_h, nodes_c, nodes_h_scattered, idx_var, attn_arr):
                 out_ = tf.concat([nbf, b], axis=0)
                 idx_var_dim1 = tf.expand_dims(idx_var, 0)
                 prev_idx_var_dim1 = tf.expand_dims(idx_var-1, 0)
@@ -241,16 +242,15 @@ class NarytreeLSTM(object):
 
                 out_ += computed_input_val
 
-                def compute_attn_ctx(flat_src_l, flat_src_r, span_scheme='PARENT'):
+                def compute_attn_ctx(flat_src_l, flat_src_r, span_scheme, matching_scheme):
 
-                    def compute(h_child, flat_src, span, is_left, matching_scheme='MLP'):
+                    def compute(h_child, flat_src, span, is_left):
                         """
                         Compute context and attention weights. Note that flat source here needs not be unique, because hidden state of child at the same level can come from the same tree.
                         :param h_child: hidden child state in batch [num_child, hidden_dim]
                         :param flat_src: flat sentence source where the order does correspond with the order of h_child
                         :param span: start and begin of each sub-sentence of the flat source
                         :param is_left: whether compute attention of left child
-                        :param matching_scheme: scheme to compute matching score
                         :return: context and attention weights
                         """
                         scope = "attn_left" if is_left else "attn_right"
@@ -335,6 +335,7 @@ class NarytreeLSTM(object):
                     span_idx_in_pairs = tf.scatter_nd(child_scatters, span_in_batch, tf.shape(span_in_batch), name="span_idx_batch_to_pairs")
 
                     if span_scheme == 'PARENT':
+                        print("Attending span under parent")
                         span_left = tf.gather(span_idx_in_pairs, even_idx)
                         span_right = tf.gather(span_idx_in_pairs, odd_idx)
 
@@ -347,10 +348,12 @@ class NarytreeLSTM(object):
                         span_right = parent_span
 
                     elif span_scheme == 'SIBLING':
+                        print("Attending span of sibling")
                         span_left = tf.gather(span_idx_in_pairs, even_idx)
                         span_right = tf.gather(span_idx_in_pairs, odd_idx)
 
                     elif span_scheme == 'ALL':
+                        print("Attending the whole sentence")
                         length_inclusive = self.lengths - 1
                         sentence_span = tf.pad(length_inclusive, tf.constant([[0, 0], [1, 0]]), 'CONSTANT')
                         span_left = sentence_span
@@ -379,13 +382,15 @@ class NarytreeLSTM(object):
 
                     return ctx_overall, attn_w_level
 
-                if attention_place == 'ROOT':
+                if self.config.attn_place == 'ROOT':
+                    print("Root only attention ... ")
                     attention_cond = tf.equal(self.tree_height - 1, idx_var)
-                elif attention_place == 'ALL':
+                elif self.config.attn_place == 'ALL':
+                    print("All nodes attention ...")
                     attention_cond = tf.less(0, idx_var)
 
                 attn_ctx, attn_weights = tf.cond(attention_cond,
-                                                 lambda: compute_attn_ctx(attn_bw, attn_fw),
+                                                 lambda: compute_attn_ctx(attn_bw, attn_fw, self.config.span_scheme, self.config.matching_scheme),
                                                  lambda: (const0f, tf.zeros((1, max_sentence_len))))
 
                 # out_ = tf.Print(out_, [attn_weights, tf.shape(attn_weights)], "attn weights")
