@@ -144,7 +144,7 @@ def train2(config):
     best_test_score_array = []
 
     # Overlay 3 plots into the subplots
-    for i in range(2):
+    for i in range(3):
         print("Experiment run# {}".format(i))
         train_set, dev_set, test_set = data['train'], data['dev'], data['test']
 
@@ -173,7 +173,6 @@ def train2(config):
             dev_score_array = []
             test_score_array = []
             loss_array = []
-
             with tf.Session() as sess:
 
                 sess.run(init)
@@ -190,7 +189,6 @@ def train2(config):
 
                     print 'validation score'
                     score = test(model, dev_set, sess, lambda sen, len, attn, g_p, idxs: visualize_attn(sen, len, attn, g_p, vocab, idxs))
-                    # score = test(model, dev_set, sess)
                     dev_score_array.append(score)
                     #print 'train score'
                     #test(model, train_set[:40], sess)
@@ -247,7 +245,6 @@ def train2(config):
 
 
 def experiment_name(config):
-
     return "atn-{}_mtching-{}_spn-{}_{}".format(
         config.attn_place,
         config.matching_scheme,

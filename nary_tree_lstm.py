@@ -689,7 +689,6 @@ class SoftMaxNarytreeLSTM(object):
         return tf.reduce_sum(tf.divide(loss, tf.to_float(self.tree_lstm.batch_size))) + regpart
 
 
-
     def train(self, batch_tree, batch_labels, session):
 
         feed_dict = {self.labels: batch_tree.labels}
