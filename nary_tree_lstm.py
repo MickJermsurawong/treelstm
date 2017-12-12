@@ -354,7 +354,9 @@ class NarytreeLSTM(object):
 
                     elif span_scheme == 'ALL':
                         print("Attending the whole sentence")
-                        length_inclusive = self.lengths - 1
+                        sentence_len = tf.gather(self.lengths, idx_left)
+                        length_inclusive = tf.expand_dims(sentence_len - 1, axis=1)
+
                         sentence_span = tf.pad(length_inclusive, tf.constant([[0, 0], [1, 0]]), 'CONSTANT')
                         span_left = sentence_span
                         span_right = sentence_span
@@ -492,7 +494,9 @@ def build_mlp(
 
 
 def atrous_conv1d(text, text_dim, output_dim, filter_width, dilation, scope):
+
     """
+    Reference from https://medium.com/@TalPerry/convolutional-methods-for-text-d5260fd5675f
     :param text: A tensor of embedded tokens with shape [batch_size,max_length,embedding_size]
     :param text_dim: The number of feature maps we'd like to calculate
     :param filter_width: filter width
