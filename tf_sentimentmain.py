@@ -111,6 +111,9 @@ def train2():
     # The colors of the different iterations
     plot_color = ['r', 'g', 'b']
 
+    # Record the best test scores for each iteration
+    best_test_score_array = []
+
     # Overlay 3 plots into the subplots
     for i in range(3):
         train_set, dev_set, test_set = data['train'], data['dev'], data['test']
@@ -133,12 +136,14 @@ def train2():
             init=tf.global_variables_initializer()
             best_valid_score=0.0
             best_valid_epoch=0
+            best_test_score=0.0
             dev_score=0.0
             test_score=0.0
 
             dev_score_array = []
             test_score_array = []
             loss_array = []
+
             with tf.Session() as sess:
                 sess.run(init)
 
@@ -161,11 +166,12 @@ def train2():
                         best_valid_score = score
                         best_valid_epoch = epoch
                         test_score = test(model,test_set,sess)
+                        best_test_score = test_score
                         test_score_array.append(test_score)
                     else:
                         test_score = test(model,test_set,sess)
                         test_score_array.append(test_score)
-                    print 'test score :', test_score, 'updated', epoch - best_valid_epoch, 'epochs ago with validation score', best_valid_score
+                    print 'Best test score :', best_test_score, 'updated', epoch - best_valid_epoch, 'epochs ago with validation score', best_valid_score
 
                     if config.plot:
                         plt.subplot(1,3,1)
@@ -195,9 +201,16 @@ def train2():
                                 plt.savefig("Optimized-Fine-Grained.png")
                             else:
                                 plt.savefig("Optimized-Binary.png")
+        
+        # Append best test scores
+        best_test_score_array.append(best_test_score)
 
         # Overlay the subplots
         plt.hold(True)
+
+    # Print out best test scores for all iterations
+    print "Best test scores: "
+    print best_test_score_array
 
 def train(restore=False):
 
