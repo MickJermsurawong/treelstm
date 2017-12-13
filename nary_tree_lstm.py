@@ -103,9 +103,9 @@ class NarytreeLSTM(object):
         sen_embedding = tf.nn.embedding_lookup(self.embedding, sentences)
 
         with tf.variable_scope(scope, reuse=True):
-            cell = tf.nn.rnn_cell.BasicLSTMCell(self.config.hidden_dim, reuse=tf.AUTO_REUSE)
+            cell = tf.contrib.rnn.LayerNormBasicLSTMCell(self.config.hidden_dim, reuse=tf.AUTO_REUSE)
             if is_bidirectional:
-                cell_bw = tf.nn.rnn_cell.BasicLSTMCell(self.config.hidden_dim, reuse=tf.AUTO_REUSE)
+                cell_bw = tf.contrib.rnn.LayerNormBasicLSTMCell(self.config.hidden_dim, reuse=tf.AUTO_REUSE)
                 bi_lstm_output, final_state = tf.nn.bidirectional_dynamic_rnn(cell, cell_bw, sen_embedding,
                                                                               sequence_length=lengths, dtype=tf.float32)
                 return bi_lstm_output[0], bi_lstm_output[1]
