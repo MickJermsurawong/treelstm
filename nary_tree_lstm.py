@@ -398,7 +398,11 @@ class NarytreeLSTM(object):
                 elif self.config.attn_place == 'NONE':
                     print("No attention ...")
                     attention_cond = tf.greater(-1, idx_var)
-
+                elif self.config.attn_place == '3':
+                    print("Attention on 3-layer deep ...")
+                    attention_cond = tf.less_equal(self.tree_height - 3, idx_var)
+                else:
+                    raise Exception("Unknown attention place")
 
                 attn_ctx, attn_weights = tf.cond(attention_cond,
                                                  lambda: compute_attn_ctx(attn_bw, attn_fw, self.config.span_scheme, self.config.matching_scheme),

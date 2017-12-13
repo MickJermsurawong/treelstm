@@ -46,21 +46,7 @@ class Config(object):
     attn_place = "ALL"
 
 
-def train2():
-
-    config = Config()
-    config.batch_size = 25
-    config.lr = 0.05
-    config.dropout = 0.5
-    config.reg = 0.0001
-    config.emb_lr = 0.02
-    config.fine_grained = True
-    config.plot = True
-
-    config.span_scheme = "ALL"
-    config.matching_scheme = "MLP"
-    config.attn_place = "ALL"
-
+def train2(config):
 
     import collections
     import numpy as np
@@ -150,6 +136,9 @@ def train2():
     config.num_emb = num_emb
     config.output_dim = num_labels
 
+    exp_name = experiment_name(config)
+    print("----Start experiment {}".format(exp_name))
+
     # The colors of the different iterations
     plot_color = ['r', 'g', 'b']
 
@@ -158,6 +147,7 @@ def train2():
 
     # Overlay 3 plots into the subplots
     for i in range(3):
+        print("Experiment run# {}".format(i))
         train_set, dev_set, test_set = data['train'], data['dev'], data['test']
 
         # return
@@ -187,6 +177,7 @@ def train2():
             loss_array = []
 
             with tf.Session() as sess:
+
                 sess.run(init)
 
                 for epoch in range(config.num_epochs):
@@ -201,6 +192,7 @@ def train2():
 
                     print 'validation score'
                     score = test(model, dev_set, sess, lambda sen, len, attn, g_p, idxs: visualize_attn(sen, len, attn, g_p, vocab, idxs))
+                    # score = test(model, dev_set, sess)
                     dev_score_array.append(score)
                     #print 'train score'
                     #test(model, train_set[:40], sess)
@@ -241,9 +233,9 @@ def train2():
                                 plt.savefig("Ancestral-Optimized-Binary.png")
                         else:
                             if config.fine_grained:
-                                plt.savefig("Optimized-Fine-Grained.png")
+                                plt.savefig("Optimized-Fine-Grained-{}.png".format(exp_name))
                             else:
-                                plt.savefig("Optimized-Binary.png")
+                                plt.savefig("Optimized-Binary-{}.png".format(exp_name))
         
         # Append best test scores
         best_test_score_array.append(best_test_score)
@@ -254,6 +246,16 @@ def train2():
     # Print out best test scores for all iterations
     print "Best test scores: "
     print best_test_score_array
+    print("----End experiment {}".format(exp_name))
+
+def experiment_name(config):
+    return "atn-{}_mtching-{}_spn-{}_{}".format(
+        config.attn_place,
+        config.matching_scheme,
+        config.span_scheme,
+        time.strftime("%d-%m-%Y_%H-%M-%S")
+    )
+
 
 def train(restore=False):
 
@@ -382,14 +384,26 @@ def evaluate(model,data,sess):
     return acc
 
 if __name__ == '__main__':
-    # if len(sys.argv) > 1:
-    #     if(sys.argv[1] == "-optimized"):
-    #         print "running optimized version"
-    train2()
-    #     else:
-    #         print "running not optimized version"
-    #         train()
-    # else:
-    #     print "running not optimized version, run with option -optimized for the optimized one"
-    #     train()
+
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--span', type=str, default='PARENT')
+    parser.add_argument('--matching', type=str, default='ADDITIVE')
+    parser.add_argument('--attn', type=str, default='ROOT')
+    args = parser.parse_args()
+
+    config = Config()
+    config.batch_size = 25
+    config.lr = 0.05
+    config.dropout = 0.5
+    config.reg = 0.0001
+    config.emb_lr = 0.02
+    config.fine_grained = True
+    config.plot = True
+
+    config.span_scheme = args.span
+    config.matching_scheme = args.matching
+    config.attn_place = args.attn
+
+    train2(config)
 
