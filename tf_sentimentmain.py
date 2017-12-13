@@ -42,7 +42,7 @@ class Config(object):
     span_scheme = "ALL"
     # ["DOT_PROD", "ADDITIVE", "MLP"]
     matching_scheme = "MLP"
-    # ["ALL", "ROOT"]
+    # ["ALL", "ROOT", "NONE"]
     attn_place = "ALL"
 
 
@@ -90,10 +90,11 @@ def train2():
             y_pred_ = np.argmax(y_pred_[:,relevant_labels], axis=1)
 
             # display results
-            batch_size = len(batch[0].sentences)
-            root_attn = attn_[-batch_size:]
-            chosen_sentence = [0, np.random.randint(1, batch_size)]
-            if examine_attn:
+
+            if examine_attn and config.attn_place != 'NONE':
+                batch_size = len(batch[0].sentences)
+                root_attn = attn_[-batch_size:]
+                chosen_sentence = [0, np.random.randint(1, batch_size)]
                 examine_attn(batch[0].sentences, batch[0].sentence_lengths, root_attn, (y_true, y_pred_), chosen_sentence)
 
             ys_true += y_true.tolist()

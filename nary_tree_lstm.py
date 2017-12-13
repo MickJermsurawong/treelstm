@@ -31,7 +31,8 @@ class NarytreeLSTM(object):
                                ):
 
             self.U = tf.get_variable("U", [config.hidden_dim * config.degree , config.hidden_dim * (3 + config.degree)], initializer=tf.random_uniform_initializer(-calc_wt_init(config.hidden_dim),calc_wt_init(config.hidden_dim)))
-            self.W = tf.get_variable("W", [config.emb_dim + config.hidden_dim * 2, config.hidden_dim], initializer=tf.random_uniform_initializer(-calc_wt_init(config.emb_dim),calc_wt_init(config.emb_dim)))
+            self.W = tf.get_variable("W", [config.emb_dim + config.hidden_dim * 2, 3 * config.hidden_dim], initializer=tf.random_uniform_initializer(-calc_wt_init(config.emb_dim),calc_wt_init(config.emb_dim)))
+            self.Wf = tf.get_variable("Wf", [config.emb_dim + config.hidden_dim * 2, config.hidden_dim], initializer=tf.random_uniform_initializer(-calc_wt_init(config.emb_dim),calc_wt_init(config.emb_dim)))
             self.b = tf.get_variable("b", [config.hidden_dim*3], initializer=tf.random_uniform_initializer(-calc_wt_init(config.hidden_dim),calc_wt_init(config.hidden_dim)))#, regularizer=tf.contrib.layers.l2_regularizer(0.0))
             self.bf = tf.get_variable("bf", [config.hidden_dim], initializer=tf.random_uniform_initializer(-calc_wt_init(config.hidden_dim),calc_wt_init(config.hidden_dim)))#, regularizer=tf.contrib.layers.l2_regularizer(0.0))
 
@@ -131,11 +132,14 @@ class NarytreeLSTM(object):
 
         with tf.variable_scope("Node", reuse=True):
 
-            W = tf.get_variable("W", [self.config.emb_dim + self.config.hidden_dim * 2, self.config.hidden_dim])
+            W = tf.get_variable("W", [self.config.emb_dim + self.config.hidden_dim * 2, 3 * self.config.hidden_dim])
+            Wf = tf.get_variable("Wf", [self.config.emb_dim + self.config.hidden_dim * 2, self.config.hidden_dim])
             U = tf.get_variable("U", [self.config.hidden_dim * self.config.degree , self.config.hidden_dim * (3 + self.config.degree)])
             b = tf.get_variable("b", [3 * self.config.hidden_dim])
             bf = tf.get_variable("bf", [self.config.hidden_dim])
 
+            nWf = tf.tile(Wf, [1, self.config.degree])
+            W_ = tf.concat([nWf, W], axis=1)
             max_sentence_len = tf.reduce_max(self.lengths)
 
             attn_fw, attn_bw = self.get_sentence_lstm_ouput(self.sentences, self.lengths, "lstm_attn", is_bidirectional=True)
@@ -228,17 +232,19 @@ class NarytreeLSTM(object):
                 def compute_input():
 
                     input_embed_padded = tf.pad(input_embed, [[0, 0], [0, self.config.hidden_dim * 2]], "CONSTANT")
-                    out = tf.matmul(input_embed_padded, W)
+                    out = tf.matmul(input_embed_padded, W_)
 
                     input_scatter = tf.slice(self.input_scatter, observables_indice_begin, observables_size)
                     input_scatter = tf.reshape(input_scatter, tf.concat([observables_size, [-1]], 0))
-                    out = tf.scatter_nd(input_scatter, out, w_scatter_shape, name=None)
-                    out = tf.tile(out, [1, 3 + self.config.degree])
+                    out = tf.scatter_nd(input_scatter, out, u_scatter_shape, name=None)
+
+
                     return out
 
                 computed_input_val = tf.cond(tf.less(0, tf.squeeze(observables_size)),
                                lambda: compute_input(),
                                lambda: const0f)
+
 
                 out_ += computed_input_val
 
@@ -371,11 +377,10 @@ class NarytreeLSTM(object):
                     ctx_overall = tf.concat([ctx_left, ctx_right], axis=-1)
                     ctx_overall = tf.nn.dropout(ctx_overall, self.dropout)
                     ctx_overall = tf.pad(ctx_overall, [[0, 0], [self.config.emb_dim, 0]], "CONSTANT")
-                    ctx_overall = tf.matmul(ctx_overall, W)
+
+                    ctx_overall = tf.matmul(ctx_overall, W_)
 
                     attn_w_level = attn_weights_l + attn_weights_r
-
-                    ctx_overall = tf.tile(ctx_overall, [1, 3 + self.config.degree])
 
                     # project to input format of current level
                     scatters_in = tf.slice(self.scatter_in, scatter_indice_begin, scatter_indice_size)
@@ -390,16 +395,23 @@ class NarytreeLSTM(object):
                 elif self.config.attn_place == 'ALL':
                     print("All nodes attention ...")
                     attention_cond = tf.less(0, idx_var)
+                elif self.config.attn_place == 'NONE':
+                    print("No attention ...")
+                    attention_cond = tf.greater(-1, idx_var)
+
 
                 attn_ctx, attn_weights = tf.cond(attention_cond,
                                                  lambda: compute_attn_ctx(attn_bw, attn_fw, self.config.span_scheme, self.config.matching_scheme),
                                                  lambda: (const0f, tf.zeros((1, max_sentence_len))))
 
+
+
+
                 # out_ = tf.Print(out_, [attn_weights, tf.shape(attn_weights)], "attn weights")
 
-                out_ += attn_ctx
-
-                attn_arr = attn_arr.write(idx_var, attn_weights)
+                if self.config.attn_place != 'NONE':
+                    out_ += attn_ctx
+                    attn_arr = attn_arr.write(idx_var, attn_weights)
 
                 v = tf.split(out_, 3 + self.config.degree, axis=1)
 
@@ -432,7 +444,11 @@ class NarytreeLSTM(object):
             nodes_h, nodes_c, nodes_h_scattered, idx_var, attn_arr = tf.while_loop(loop_cond, _recurrence, loop_vars,
                                                               parallel_iterations=1)
 
-            self.attention = attn_arr.concat()
+            if self.config.attn_place != 'NONE':
+                self.attention = attn_arr.concat()
+            else:
+                self.attention = const0f
+
 
             return nodes_h_scattered.concat(), nodes_h
 
