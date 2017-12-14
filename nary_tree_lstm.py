@@ -304,6 +304,12 @@ class NarytreeLSTM(object):
 
                             attn_ws = restricted_softmax_on_sequence_range(matching_score, tf.shape(self.sentences)[1], span)
                             context = tf.reduce_sum(flat_src * tf.expand_dims(attn_ws, axis=-1), axis=1)
+
+                            # scaling adjusting for different size
+                            span_size = (span[:, 1] - span[:, 0]) + 1
+                            span_size_dim = tf.cast(tf.expand_dims(span_size, axis=1), dtype=tf.float32)
+                            context = context * (span_size_dim / 40)
+
                             return context, attn_ws
 
                     scatter_indice_begin, scatter_indice_size, child_scatters = compute_indices()

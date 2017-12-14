@@ -25,7 +25,7 @@ class Config(object):
     output_dim=None
     degree = 2
     num_labels = 3
-    num_epochs = 30
+    num_epochs = 20
 
     maxseqlen = None
     maxnodesize = None
@@ -388,7 +388,7 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--span', type=str, default='PARENT')
-    parser.add_argument('--matching', type=str, default='ADDITIVE')
+    parser.add_argument('--matching', type=str, default='DOT_PROD')
     parser.add_argument('--attn', type=str, default='ROOT')
     args = parser.parse_args()
 
