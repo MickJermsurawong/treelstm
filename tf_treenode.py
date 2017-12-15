@@ -13,6 +13,7 @@ class tNode(object):
         self.children = []
         self.idx=idx
         self.span=None
+        self.span_idx = []
 
     def add_parent(self,parent):
         self.parent=parent
@@ -124,6 +125,28 @@ class tNode(object):
             assert len(labels) > 0
             root.label = labels.pop()
             return labels
+
+def compute_span_idx(root):
+    leaf_count = [-1]
+
+    def get_min_max(r):
+
+        if r.children:
+            min_idx = 9999
+            max_idx = -1
+            for c in r.children:
+                min_c, max_c = get_min_max(c)
+                min_idx = min(min_idx, min_c)
+                max_idx = max(max_idx, max_c)
+            min_idx, max_idx
+            r.span_idx = [min_idx, max_idx]
+            return min_idx, max_idx
+        else:
+            leaf_count[0] += 1
+            r.span_idx = [leaf_count[0], leaf_count[0]]
+            return leaf_count[0], leaf_count[0]
+    get_min_max(root)
+
 
 
 def processTree(root,funclist=None,argslist=None):
