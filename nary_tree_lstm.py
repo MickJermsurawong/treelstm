@@ -118,20 +118,6 @@ class NarytreeLSTM(object):
                 outputs, _ = tf.nn.dynamic_rnn(cell, sen_embedding, lengths, dtype=tf.float32)
                 return outputs, outputs
 
-    def get_sentence_cnn_output(self, sentences, not_null_count, max_length):
-        sentences = tf.nn.embedding_lookup(self.embedding, sentences)
-
-        with tf.variable_scope("cnn_sentence", reuse=tf.AUTO_REUSE):
-            not_null_mask = tf.expand_dims(tf.cast(tf.sequence_mask(not_null_count, max_length), dtype=tf.float32), axis=-1)
-            sentences *= not_null_mask
-            out = tf.nn.relu(atrous_conv1d(sentences, self.config.emb_dim, self.config.emb_dim, filter_width=2, dilation=1, scope="cnn_layer1"))
-            out *= not_null_mask
-            out = tf.nn.relu(atrous_conv1d(out, self.config.emb_dim, self.config.emb_dim, filter_width=2, dilation=2, scope="cnn_layer2"))
-            out *= not_null_mask
-            out = atrous_conv1d(out, self.config.emb_dim, self.config.hidden_dim, filter_width=2, dilation=4, scope="cnn_layer3")
-            out *= not_null_mask
-            return out, out
-
     def get_outputs(self):
 
         with tf.variable_scope("Node", reuse=True):
@@ -147,7 +133,6 @@ class NarytreeLSTM(object):
             max_sentence_len = tf.reduce_max(self.lengths)
 
             attn_fw, attn_bw = self.get_sentence_lstm_ouput(self.sentences, self.lengths, "lstm_attn", is_bidirectional=True)
-            # attn_fw, attn_bw = self.get_sentence_cnn_output(self.sentences, self.lengths, max_sentence_len)
 
             nbf = tf.tile(bf, [self.config.degree])
             # nbf = tf.Print(nbf, [attn_src_l, tf.shape(attn_src_l)], "attn_src_l")
@@ -175,10 +160,8 @@ class NarytreeLSTM(object):
                     tf.slice(self.out_indices, idx_var_dim1, [2]), 2)
                 out_size = out_indice_end - out_indice_begin
                 flow = tf.slice(self.flows, idx_var_dim1, [1])
-                w_scatter_shape = tf.concat([flow, [self.config.hidden_dim]], axis=0)
                 u_scatter_shape = tf.concat([flow, [self.config.hidden_dim * (3 + self.config.degree)]], axis=0)
                 c_scatter_shape = tf.concat([flow, [self.config.hidden_dim * self.config.degree]],axis=0)
-
 
                 def compute_indices():
                     prev_level_indice_begin, prev_level_indice_end = tf.split(
@@ -227,7 +210,6 @@ class NarytreeLSTM(object):
 
                 observable = tf.squeeze(tf.slice(self.observables, observables_indice_begin, observables_size))
 
-
                 input_embed = tf.reshape(tf.nn.embedding_lookup(self.embedding, observable),[-1,self.config.emb_dim])
 
                 def compute_input():
@@ -264,7 +246,6 @@ class NarytreeLSTM(object):
                                                       name="tree_idx_batch_to_pairs")
 
                     # create span indices
-                    # nbf = tf.Print(nbf, [self.span_idxs], "span_idxs")
                     zero_expanded = tf.expand_dims(tf.constant(0), axis=0)
                     two_expanded = tf.expand_dims(tf.constant(2), axis=0)
                     span_in_batch = tf.slice(self.span_idxs, tf.concat([level_indice_begin, zero_expanded], axis=0),
@@ -537,6 +518,44 @@ class AttentionModule(object):
             return context, attn_ws
 
 
+class FlatSentenceCnnRep(object):
+    """
+    Alternative to sequential LSTM representation as an attentional space
+    """
+
+    def atrous_conv1d(self, text, text_dim, output_dim, filter_width, dilation, scope):
+        """
+        Reference from https://medium.com/@TalPerry/convolutional-methods-for-text-d5260fd5675f
+        :param text: A tensor of embedded tokens with shape [batch_size,max_length,embedding_size]
+        :param text_dim: The number of feature maps we'd like to calculate
+        :param filter_width: filter width
+        :param dilation: dilation rate
+        :return: A tensor of the concolved input with shape [batch_size,max_length,output_size]
+        """
+
+        with tf.variable_scope(scope, reuse=tf.AUTO_REUSE):
+            text = tf.expand_dims(text, axis=1)
+            shape = [1, filter_width, text_dim, output_dim]
+            filter_var = tf.get_variable("conv_filter", shape=shape)
+
+            convolved = tf.nn.atrous_conv2d(text, filters=filter_var, rate=dilation, padding="SAME")
+            result = tf.squeeze(convolved, axis=1)
+            return result
+
+    def get_sentence_cnn_output(self, sentences, input_dim, output_dim, not_null_count, max_length):
+
+        with tf.variable_scope("cnn_sentence", reuse=tf.AUTO_REUSE):
+            not_null_mask = tf.expand_dims(tf.cast(tf.sequence_mask(not_null_count, max_length), dtype=tf.float32), axis=-1)
+            sentences *= not_null_mask
+            out = tf.nn.relu(self.atrous_conv1d(sentences, input_dim, input_dim, filter_width=2, dilation=1, scope="cnn_layer1"))
+            out *= not_null_mask
+            out = tf.nn.relu(self.atrous_conv1d(out, input_dim, input_dim, filter_width=2, dilation=2, scope="cnn_layer2"))
+            out *= not_null_mask
+            out = self.atrous_conv1d(out, input_dim, output_dim, filter_width=2, dilation=4, scope="cnn_layer3")
+            out *= not_null_mask
+            return out, out
+
+
 def build_mlp(
         input,
         output_size,
@@ -561,26 +580,7 @@ def build_mlp(
         return tf.layers.dense(inputs=prev_layer, units=output_size, activation=output_activation)
 
 
-def atrous_conv1d(text, text_dim, output_dim, filter_width, dilation, scope):
 
-    """
-    Reference from https://medium.com/@TalPerry/convolutional-methods-for-text-d5260fd5675f
-    :param text: A tensor of embedded tokens with shape [batch_size,max_length,embedding_size]
-    :param text_dim: The number of feature maps we'd like to calculate
-    :param filter_width: filter width
-    :param dilation: dilation rate
-    :return: A tensor of the concolved input with shape [batch_size,max_length,output_size]
-    """
-
-    with tf.variable_scope(scope, reuse=tf.AUTO_REUSE):
-
-        text = tf.expand_dims(text, axis=1)
-        shape = [1, filter_width, text_dim, output_dim]
-        filter_var = tf.get_variable("conv_filter", shape=shape)
-
-        convolved = tf.nn.atrous_conv2d(text, filters=filter_var, rate=dilation, padding="SAME")
-        result = tf.squeeze(convolved, axis=1)
-        return result
 
 class SoftMaxNarytreeLSTM(object):
 
