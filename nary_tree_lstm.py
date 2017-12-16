@@ -373,6 +373,30 @@ def restricted_softmax_on_mask(logits, binary_mask):
     return tf.nn.softmax(logits + large_neg_on_empty)
 
 
+def build_mlp(
+        input,
+        output_size,
+        drop_out,
+        scope,
+        n_layers=2,
+        sizes=[64, 64],
+        activation=tf.nn.relu,
+        output_activation=None
+        ):
+
+    if len(sizes) != n_layers:
+        raise Exception("Size of layers should correspond with layer size")
+
+    with tf.variable_scope(scope, reuse=tf.AUTO_REUSE):
+        prev_layer = input
+        for i in range(n_layers):
+            prev_layer = tf.nn.dropout(prev_layer, drop_out)
+            prev_layer = tf.layers.dense(inputs=prev_layer, units=sizes[i], activation=activation)
+
+        prev_layer = tf.nn.dropout(prev_layer, drop_out)
+        return tf.layers.dense(inputs=prev_layer, units=output_size, activation=output_activation)
+
+
 class AttentionModule(object):
 
     def __init__(self, hidden_dim, matching_scheme, span_scheme):
@@ -518,70 +542,6 @@ class AttentionModule(object):
             return context, attn_ws
 
 
-class FlatSentenceCnnRep(object):
-    """
-    Alternative to sequential LSTM representation as an attentional space
-    """
-
-    def atrous_conv1d(self, text, text_dim, output_dim, filter_width, dilation, scope):
-        """
-        Reference from https://medium.com/@TalPerry/convolutional-methods-for-text-d5260fd5675f
-        :param text: A tensor of embedded tokens with shape [batch_size,max_length,embedding_size]
-        :param text_dim: The number of feature maps we'd like to calculate
-        :param filter_width: filter width
-        :param dilation: dilation rate
-        :return: A tensor of the concolved input with shape [batch_size,max_length,output_size]
-        """
-
-        with tf.variable_scope(scope, reuse=tf.AUTO_REUSE):
-            text = tf.expand_dims(text, axis=1)
-            shape = [1, filter_width, text_dim, output_dim]
-            filter_var = tf.get_variable("conv_filter", shape=shape)
-
-            convolved = tf.nn.atrous_conv2d(text, filters=filter_var, rate=dilation, padding="SAME")
-            result = tf.squeeze(convolved, axis=1)
-            return result
-
-    def get_sentence_cnn_output(self, sentences, input_dim, output_dim, not_null_count, max_length):
-
-        with tf.variable_scope("cnn_sentence", reuse=tf.AUTO_REUSE):
-            not_null_mask = tf.expand_dims(tf.cast(tf.sequence_mask(not_null_count, max_length), dtype=tf.float32), axis=-1)
-            sentences *= not_null_mask
-            out = tf.nn.relu(self.atrous_conv1d(sentences, input_dim, input_dim, filter_width=2, dilation=1, scope="cnn_layer1"))
-            out *= not_null_mask
-            out = tf.nn.relu(self.atrous_conv1d(out, input_dim, input_dim, filter_width=2, dilation=2, scope="cnn_layer2"))
-            out *= not_null_mask
-            out = self.atrous_conv1d(out, input_dim, output_dim, filter_width=2, dilation=4, scope="cnn_layer3")
-            out *= not_null_mask
-            return out, out
-
-
-def build_mlp(
-        input,
-        output_size,
-        drop_out,
-        scope,
-        n_layers=2,
-        sizes=[64, 64],
-        activation=tf.nn.relu,
-        output_activation=None
-        ):
-
-    if len(sizes) != n_layers:
-        raise Exception("Size of layers should correspond with layer size")
-
-    with tf.variable_scope(scope, reuse=tf.AUTO_REUSE):
-        prev_layer = input
-        for i in range(n_layers):
-            prev_layer = tf.nn.dropout(prev_layer, drop_out)
-            prev_layer = tf.layers.dense(inputs=prev_layer, units=sizes[i], activation=activation)
-
-        prev_layer = tf.nn.dropout(prev_layer, drop_out)
-        return tf.layers.dense(inputs=prev_layer, units=output_size, activation=output_activation)
-
-
-
-
 class SoftMaxNarytreeLSTM(object):
 
     def __init__(self, config):
@@ -623,7 +583,6 @@ class SoftMaxNarytreeLSTM(object):
         roots_h = nodes_h.read(nodes_h.size()-1)
         out = tf.matmul(roots_h, self.W) + self.b
         return out
-
 
     def get_output(self):
         return self.output
