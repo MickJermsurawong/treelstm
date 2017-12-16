@@ -1,6 +1,6 @@
 
 
-from tf_treenode import tNode,processTree
+from tf_treenode import tNode,processTree, compute_span_idx
 import numpy as np
 import os
 import random
@@ -38,28 +38,40 @@ class Vocab(object):
     def decode(self,idx):
         assert idx < len(self.words) and idx >=0
         return self.idx2word[idx]
+
     def size(self):
         return len(self.words)
 
     def compute_gloves_embedding(self, glove_dir):
-        vector_format = 'f' * 300
-        size = struct.calcsize(vector_format)
-        glove_voc = Vocab(os.path.join(glove_dir, 'glove_vocab.txt'))
-        self.embed_matrix = np.random.rand(self.size(), 300) * 0.1 - 0.05
-        with open(os.path.join(glove_dir, 'glove_embeddings.b'), "rb") as fi:
-            id = 0
-            while True:
-                vector = fi.read(size)
-                if len(vector) == size:
-                    v = struct.unpack(vector_format, vector)
-                    idx = self.encode(glove_voc.decode(id))
-                    if idx is not None:
-                        self.embed_matrix[idx,:] = v
-                else:
-                    break
-                id += 1
-                if(id%100000 == 0):
-                    print("read " + str(id) + " embeds and counting...")
+        tree_glove_file = "data/glove/glove_embeddings_tree.npy"
+
+        if os.path.exists(tree_glove_file):
+            saved_glove = np.load(tree_glove_file)
+            print("Found glove tree embedding of {}...".format(saved_glove.shape))
+            assert saved_glove.shape[0] == self.size()
+            self.embed_matrix = saved_glove
+        else:
+            vector_format = 'f' * 300
+            size = struct.calcsize(vector_format)
+            glove_voc = Vocab(os.path.join(glove_dir, 'glove_vocab.txt'))
+            self.embed_matrix = np.random.rand(self.size(), 300) * 0.1 - 0.05
+            with open(os.path.join(glove_dir, 'glove_embeddings.b'), "rb") as fi:
+                id = 0
+                while True:
+                    vector = fi.read(size)
+                    if len(vector) == size:
+                        v = struct.unpack(vector_format, vector)
+                        idx = self.encode(glove_voc.decode(id))
+                        if idx is not None:
+                            self.embed_matrix[idx,:] = v
+                    else:
+                        break
+                    id += 1
+                    if(id%100000 == 0):
+                        print("read " + str(id) + " embeds and counting...")
+            np.save(tree_glove_file, self.embed_matrix)
+            print("Saved glove tree file {}!".format(tree_glove_file))
+
 
 def load_sentiment_treebank(data_dir, glove_dir, fine_grained):
     voc=Vocab(os.path.join(data_dir,'vocab-cased.txt'))
@@ -83,6 +95,7 @@ def load_sentiment_treebank(data_dir, glove_dir, fine_grained):
         trees=parse_trees(sentencepath,treepath,labelpath)
         if not fine_grained:
             trees=[tree for tree in trees if tree.label != 0]
+        [compute_span_idx(t) for t in trees]
         trees = [(processTree(tree,fnlist,arglist),tree.label) for tree in trees]
         data[split]=trees
 
@@ -145,7 +158,7 @@ def parse_tree(sentence, parents, labels):
             idx = i
             prev = None
             while True:
-                node = tNode(idx)  
+                node = tNode(idx)
                 if prev is not None:
                     assert prev.idx != node.idx
                     node.add_child(prev)
@@ -228,22 +241,56 @@ def extract_tree_data(tree,max_degree=2,only_leaves_have_vals=True,with_labels=F
                np.array(tree_str,dtype='int32'))
 
 def build_batch_trees(trees, mini_batch_size):
-    def expand_batch_with_sample(batch_node, sample_node):
+    def expand_batch_with_sample(batch_node, sample_node, tree_index):
         if batch_node.parent is None: # root
-            batch_node.add_sample(-1 if sample_node.word is None else sample_node.word, tree.label)
+            batch_node.add_sample(-1 if sample_node.word is None else sample_node.word, tree.label,
+                                  tree_index=tree_index, span_index=sample_node.span_idx)
         for child in zip(range(len(sample_node.children)),sample_node.children): # iterate over direct children, [(0, child0), (1, child1), ...]
-            batch_node.expand_or_add_child(child[1].word, child[1].label, child[0])
+            batch_node.expand_or_add_child(child[1].word, child[1].label, child[0], tree_index, span_index=child[1].span_idx)
         for children in zip(batch_node.children, sample_node.children): # Recursive function call
-            expand_batch_with_sample(children[0], children[1])
+            expand_batch_with_sample(children[0], children[1], tree_index)
+
     batches = []
     while(len(trees)>0):
         batch = trees[-mini_batch_size:]
         del trees[-mini_batch_size:]
         batch_tree = BatchTree.empty_tree()
-        for tree in batch:
-            expand_batch_with_sample(batch_tree.root, tree)
-        batches.append(BatchTreeSample(batch_tree))
+
+        batch_sentences = []
+
+        for i, tree in enumerate(batch):
+            expand_batch_with_sample(batch_tree.root, tree, i)
+            sentence = extract_sentence(tree)
+            batch_sentences.append(sentence)
+        batch_sentences, lens = fill_data(batch_sentences)
+        batch_tree = BatchTreeSample(batch_tree)
+        batch_tree.add_batch_sentences(batch_sentences, lens)
+        batches.append(batch_tree)
     return batches
+
+
+def fill_data(data):
+    # Get lengths of each row of data
+    lens = np.array([len(i) for i in data])
+
+    # Mask of valid places in each row
+    mask = np.arange(lens.max()) < lens[:, None]
+
+    # Setup output array and put elements from data into masked positions
+    out = np.ones(mask.shape, dtype=np.int32)
+    out[mask] = np.concatenate(data)
+    return out, lens
+
+def extract_sentence(tree):
+    sentence = []
+    def extract(root):
+        for c in root.children:
+            extract(c)
+        if root.word:
+            sentence.append(root.word)
+
+    extract(tree)
+    return sentence
 
 
 def build_labelized_batch_trees(data, mini_batch_size):

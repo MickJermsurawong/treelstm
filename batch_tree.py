@@ -3,7 +3,7 @@ import collections
 
 class BatchTreeSample(object):
     def __init__(self, tree):
-        observables, flows, input_scatter, scatter_out, scatter_in, scatter_in_indices, labels, observables_indices, out_indices, child_scatter_indices, nodes_count, nodes_count_per_indice = tree.build_batch_tree_sample()
+        observables, flows, input_scatter, scatter_out, scatter_in, scatter_in_indices, labels, observables_indices, out_indices, child_scatter_indices, nodes_count, nodes_count_per_indice, tree_idxs, span_idxs = tree.build_batch_tree_sample()
         self.observables = observables
         self.flows = flows
         self.input_scatter = input_scatter
@@ -17,6 +17,25 @@ class BatchTreeSample(object):
         self.child_scatter_indices = child_scatter_indices
         self.nodes_count = nodes_count
         self.nodes_count_per_indice = nodes_count_per_indice
+        self.tree_idxs = tree_idxs
+        self.span_idxs = span_idxs
+        # sentences info
+        self.sentences = None
+        self.sentence_lengths = None
+
+    def add_batch_sentences(self, sentences, lengths):
+        self.sentences = sentences
+        self.sentence_lengths = lengths
+
+
+        # sentences info
+        self.sentences = None
+        self.sentence_lengths = None
+
+    def add_batch_sentences(self, sentences, lengths):
+        self.sentences = sentences
+        self.sentence_lengths = lengths
+
 
 class BatchTree(object):
 
@@ -24,7 +43,7 @@ class BatchTree(object):
         self.root = root_node
 
     class Node(object):
-        def __init__(self, tree_parent, samples_values, labels_values, scatter_indices, parent_node = None):
+        def __init__(self, tree_parent, samples_values, labels_values, scatter_indices, tree_idx=None, span_index=None, parent_node = None):
             self.parent = parent_node
             self.samples_values = samples_values
             self.labels_values = labels_values
@@ -32,22 +51,40 @@ class BatchTree(object):
             self.children = []
             self.tree_parent = tree_parent
             self.flow_prefix = 0 if parent_node is None else len(parent_node.samples_values)-1
+            self.tree_indices = [tree_idx] if tree_idx is not None else []
+            self.span_indices = [span_index] if span_index is not None else []
 
         def add_child(self, child):
-            self.children.append(child)
+            raise Exception("Unable to add child without the necessary metadata")
 
-        def expand_or_add_child(self, sample_values, label_value, child_index):
+        def expand_or_add_child(self, sample_values, label_value, child_index, tree_idx, span_index):
             if len(self.children) <= child_index : # create a child
                 assert(child_index == len(self.children)) # we should grow the tree in a constant way
-                self.children.append(BatchTree.Node(self.tree_parent, [-1 if sample_values is None else sample_values], [-1 if label_value is None else label_value], [len(self.samples_values) - 1] , self))
+                self.children.append(BatchTree.Node(tree_parent=self.tree_parent,
+                                                    samples_values=[-1 if sample_values is None else sample_values],
+                                                    labels_values=[-1 if label_value is None else label_value],
+                                                    scatter_indices=[len(self.samples_values) - 1],
+                                                    tree_idx=tree_idx,
+                                                    span_index=span_index,
+                                                    parent_node=self))
             else:
-                self.children[child_index].add_sample(-1 if sample_values is None else sample_values, -1 if label_value is None else label_value, len(self.samples_values) - 1)
+                self.children[child_index].add_sample(sample_values=-1 if sample_values is None else sample_values,
+                                                      label_values=-1 if label_value is None else label_value,
+                                                      tree_index=tree_idx,
+                                                      span_index=span_index,
+                                                      scatter_indice=len(self.samples_values) - 1)
             return self.children[child_index]
 
         # Adds sample value (word value at the node) and label value of node
-        def add_sample(self, sample_values, label_values, scatter_indice = None):
+        def add_sample(self, sample_values,
+                       label_values,
+                       tree_index,
+                       span_index,
+                       scatter_indice = None):
             self.samples_values.append(sample_values)
             self.labels_values.append(-1 if label_values is None else label_values)
+            self.tree_indices.append(tree_index)
+            self.span_indices.append(span_index)
             if scatter_indice is None:
                 self.scatter_indices.append(0 if not self.scatter_indices else self.scatter_indices[-1] + 1)
             else:
@@ -65,6 +102,8 @@ class BatchTree(object):
             observable = np.array(node.samples_values)[np.array(node.samples_values) >= 0]#.reshape((1, len(node.samples_values)))
             scatter_out= np.array(node.scatter_indices)#.reshape((1, len(node.scatter_indices)))
             labels= np.array(node.labels_values)#.reshape((1, len(node.labels_values)))
+            tree_idxs = np.array(node.tree_indices)
+            span_idxs = np.array(node.span_indices)
 
             if(level in batch_levels):
                 level_dict = batch_levels[level]
@@ -73,6 +112,8 @@ class BatchTree(object):
                 level_dict["scatter_out"].append(scatter_out + max_flow*len(level_dict["scatter_out"]))
                 level_dict["flow"] += len(node.samples_values)
                 level_dict["labels"].append(labels)
+                level_dict["tree_idxs"].append(tree_idxs)
+                level_dict["span_idxs"].append(span_idxs)
             else:
                 level_dict = dict()
                 level_dict["mask"] = collections.deque([mask])
@@ -80,6 +121,8 @@ class BatchTree(object):
                 level_dict["flow"] = len(node.samples_values)
                 level_dict["scatter_out"] = collections.deque([scatter_out])
                 level_dict["labels"] = collections.deque([labels])
+                level_dict["tree_idxs"] = collections.deque([tree_idxs])
+                level_dict["span_idxs"] = collections.deque([span_idxs])
                 level_dict["childs_transpose_scatter"] = collections.deque([])
                 level_dict["scatter_in"] = collections.deque([])
                 level_dict["childs_transpose_scatter_offset"] = 0
@@ -103,6 +146,8 @@ class BatchTree(object):
         scatter_in = np.array([]).astype(dtype=np.int32)
         childs_transpose_scatter = np.array([]).astype(dtype=np.int32)
         labels = np.array([]).astype(dtype=np.int32)
+        tree_idxs = np.array([]).astype(dtype=np.int32)
+        span_idxs = np.array([]).astype(dtype=np.int32).reshape((0,2))
         nodes_count = np.zeros(max_level).astype(dtype=np.int32)
         observables_indices = np.zeros(max_level+1).astype(dtype=np.int32)
         out_indices = np.zeros(max_level + 1).astype(dtype=np.int32)
@@ -128,10 +173,12 @@ class BatchTree(object):
                 scatter_in = np.concatenate(
                     [scatter_in, scatter_in_level], axis=0)
             labels = np.concatenate([labels, np.concatenate(level_dict["labels"], axis=0).astype(dtype=np.int32)], axis=0)
+            tree_idxs = np.concatenate([tree_idxs, np.concatenate(level_dict["tree_idxs"], axis=0).astype(dtype=np.int32)], axis=0)
+            span_idxs = np.concatenate([span_idxs, np.concatenate(level_dict["span_idxs"], axis=0).astype(dtype=np.int32)], axis=0)
         samples_indices = scatter_out % max_flow
         _, c = np.unique(samples_indices, return_counts=True)
         nodes_count_per_indice = c[samples_indices]
-        return observables, flows, input_scatter, scatter_out, scatter_in, scatter_in_indices, labels, observables_indices, out_indices, childs_transpose_scatter, nodes_count, nodes_count_per_indice
+        return observables, flows, input_scatter, scatter_out, scatter_in, scatter_in_indices, labels, observables_indices, out_indices, childs_transpose_scatter, nodes_count, nodes_count_per_indice, tree_idxs, span_idxs
 
     @staticmethod
     def empty_tree():
