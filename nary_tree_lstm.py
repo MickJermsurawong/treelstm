@@ -9,10 +9,15 @@ def calc_wt_init(fan_in=300):
     eps = 1.0 / np.sqrt(fan_in)
     return eps
 
-class NarytreeLSTM(object):
 
+class NarytreeLSTM(object):
     def __init__(self, config=None):
         self.config = config
+        self.attention_module = AttentionModule(
+            config.hidden_dim,
+            config.matching_scheme,
+            config.span_scheme
+        )
 
         with tf.variable_scope("Embed", regularizer=None):
 
@@ -113,20 +118,6 @@ class NarytreeLSTM(object):
                 outputs, _ = tf.nn.dynamic_rnn(cell, sen_embedding, lengths, dtype=tf.float32)
                 return outputs, outputs
 
-    def get_sentence_cnn_output(self, sentences, not_null_count, max_length):
-        sentences = tf.nn.embedding_lookup(self.embedding, sentences)
-
-        with tf.variable_scope("cnn_sentence", reuse=tf.AUTO_REUSE):
-            not_null_mask = tf.expand_dims(tf.cast(tf.sequence_mask(not_null_count, max_length), dtype=tf.float32), axis=-1)
-            sentences *= not_null_mask
-            out = tf.nn.relu(atrous_conv1d(sentences, self.config.emb_dim, self.config.emb_dim, filter_width=2, dilation=1, scope="cnn_layer1"))
-            out *= not_null_mask
-            out = tf.nn.relu(atrous_conv1d(out, self.config.emb_dim, self.config.emb_dim, filter_width=2, dilation=2, scope="cnn_layer2"))
-            out *= not_null_mask
-            out = atrous_conv1d(out, self.config.emb_dim, self.config.hidden_dim, filter_width=2, dilation=4, scope="cnn_layer3")
-            out *= not_null_mask
-            return out, out
-
     def get_outputs(self):
 
         with tf.variable_scope("Node", reuse=True):
@@ -142,7 +133,6 @@ class NarytreeLSTM(object):
             max_sentence_len = tf.reduce_max(self.lengths)
 
             attn_fw, attn_bw = self.get_sentence_lstm_ouput(self.sentences, self.lengths, "lstm_attn", is_bidirectional=True)
-            # attn_fw, attn_bw = self.get_sentence_cnn_output(self.sentences, self.lengths, max_sentence_len)
 
             nbf = tf.tile(bf, [self.config.degree])
             # nbf = tf.Print(nbf, [attn_src_l, tf.shape(attn_src_l)], "attn_src_l")
@@ -170,10 +160,8 @@ class NarytreeLSTM(object):
                     tf.slice(self.out_indices, idx_var_dim1, [2]), 2)
                 out_size = out_indice_end - out_indice_begin
                 flow = tf.slice(self.flows, idx_var_dim1, [1])
-                w_scatter_shape = tf.concat([flow, [self.config.hidden_dim]], axis=0)
                 u_scatter_shape = tf.concat([flow, [self.config.hidden_dim * (3 + self.config.degree)]], axis=0)
                 c_scatter_shape = tf.concat([flow, [self.config.hidden_dim * self.config.degree]],axis=0)
-
 
                 def compute_indices():
                     prev_level_indice_begin, prev_level_indice_end = tf.split(
@@ -196,9 +184,7 @@ class NarytreeLSTM(object):
 
                     scatters_in = tf.slice(self.scatter_in, scatter_indice_begin, scatter_indice_size)
                     scatters_in = tf.reshape(scatters_in, tf.concat([scatter_indice_size, [-1]], 0))
-                    #scatters_in = tf.Print(scatters_in, [idx_var, tf.shape(hs), u_scatter_shape, scatters_in], "hs", 300, 300)
                     out = tf.scatter_nd(scatters_in, out, u_scatter_shape, name=None)
-                    # out = tf.Print(out, [out, tf.shape(out)], "hs-computed after reshaping")
                     return out
 
                 def cs_compute():
@@ -210,8 +196,6 @@ class NarytreeLSTM(object):
 
                     scatters_in = tf.slice(self.scatter_in, scatter_indice_begin, scatter_indice_size)
                     scatters_in = tf.reshape(scatters_in, tf.concat([scatter_indice_size, [-1]], 0))
-                    #scatters_in = tf.Print(scatters_in, [idx_var, tf.shape(cs), c_scatter_shape, scatters_in], "cs",
-                    #                       300, 300)
                     cs = tf.scatter_nd(scatters_in, cs, c_scatter_shape, name=None)
                     return cs
 
@@ -226,7 +210,6 @@ class NarytreeLSTM(object):
 
                 observable = tf.squeeze(tf.slice(self.observables, observables_indice_begin, observables_size))
 
-
                 input_embed = tf.reshape(tf.nn.embedding_lookup(self.embedding, observable),[-1,self.config.emb_dim])
 
                 def compute_input():
@@ -238,7 +221,6 @@ class NarytreeLSTM(object):
                     input_scatter = tf.reshape(input_scatter, tf.concat([observables_size, [-1]], 0))
                     out = tf.scatter_nd(input_scatter, out, u_scatter_shape, name=None)
 
-
                     return out
 
                 computed_input_val = tf.cond(tf.less(0, tf.squeeze(observables_size)),
@@ -247,136 +229,38 @@ class NarytreeLSTM(object):
 
                 out_ += computed_input_val
 
-                def compute_attn_ctx(flat_src_l, flat_src_r, span_scheme, matching_scheme):
-
-                    def compute(h_child, flat_src, span, is_left):
-                        """
-                        Compute context and attention weights. Note that flat source here needs not be unique, because hidden state of child at the same level can come from the same tree.
-                        :param h_child: hidden child state in batch [num_child, hidden_dim]
-                        :param flat_src: flat sentence source where the order does correspond with the order of h_child
-                        :param span: start and begin of each sub-sentence of the flat source
-                        :param is_left: whether compute attention of left child
-                        :return: context and attention weights
-                        """
-                        scope = "attn_left" if is_left else "attn_right"
-
-                        with tf.variable_scope(scope, reuse=tf.AUTO_REUSE):
-
-                            h_child = tf.nn.dropout(h_child, self.dropout)
-                            flat_src = tf.nn.dropout(flat_src, self.dropout)
-
-                            h_child = tf.reshape(h_child, [-1, self.config.hidden_dim])
-                            h_child = tf.expand_dims(h_child, axis=1)
-
-                            if is_left:
-                                flat_src = tf.layers.dense(flat_src, self.config.hidden_dim, name="attn_src_proj_left",
-                                                           reuse=tf.AUTO_REUSE)
-                            else:
-                                flat_src = tf.layers.dense(flat_src, self.config.hidden_dim, name="attn_src_proj_right",
-                                                           reuse=tf.AUTO_REUSE)
-
-                            if matching_scheme == 'DOT_PROD':
-                                print("Using dot product for matching score...")
-                                matching_score = tf.reduce_sum(h_child * flat_src, axis=-1)
-                            elif matching_scheme == 'ADDITIVE':
-                                print("Using additive for matching score...")
-                                h_child = tf.layers.dense(h_child,
-                                                          self.config.hidden_dim,
-                                                          name="attn_child_proj",
-                                                          reuse=tf.AUTO_REUSE, use_bias=False)
-                                matching_score = tf.nn.dropout(tf.nn.relu(h_child + flat_src), self.dropout)
-                                matching_score = tf.squeeze(tf.layers.dense(matching_score, 1, name="attn_score", reuse=tf.AUTO_REUSE), axis=-1)
-                            elif matching_scheme == 'MLP':
-                                print("Building mlp for matching score...")
-                                h_child = tf.tile(h_child, [1, tf.shape(flat_src_r)[1], 1])
-                                matching_score = build_mlp(
-                                    input=tf.concat([h_child, flat_src_r], axis=-1),
-                                    output_size=1,
-                                    drop_out=1,
-                                    scope="matching_mlp",
-                                    n_layers=2,
-                                    sizes=[4, 4],
-                                    output_activation=tf.nn.relu)
-                                matching_score = tf.squeeze(matching_score, axis=-1)
-                            else:
-                                raise Exception("Matching func {} is not known".format(matching_scheme))
-
-                            attn_ws = restricted_softmax_on_sequence_range(matching_score, tf.shape(self.sentences)[1], span)
-                            context = tf.reduce_sum(flat_src * tf.expand_dims(attn_ws, axis=-1), axis=1)
-
-                            # scaling adjusting for different size
-                            span_size = (span[:, 1] - span[:, 0]) + 1
-                            span_size_dim = tf.cast(tf.expand_dims(span_size, axis=1), dtype=tf.float32)
-                            context = context * (span_size_dim / 40)
-
-                            return context, attn_ws
+                def compute_attn_ctx(flat_src_l, flat_src_r):
 
                     scatter_indice_begin, scatter_indice_size, child_scatters = compute_indices()
 
                     child_hs_in_batch = nodes_h.read(idx_var - 1)
-                    children_in_pairs = tf.scatter_nd(child_scatters, child_hs_in_batch, tf.shape(child_hs_in_batch), name="child_batch_to_pairs")
-
-                    # create index to extract left and right children
-                    idx_range = tf.range(tf.shape(children_in_pairs)[0])
-                    even_odd_idx = tf.transpose(tf.reshape(idx_range, [-1, 2]))
-                    even_idx = even_odd_idx[0]
-                    odd_idx = even_odd_idx[1]
-
-                    child_h_left = tf.gather(children_in_pairs, even_idx)
-                    child_h_right = tf.gather(children_in_pairs, odd_idx)
+                    children_in_pairs = tf.scatter_nd(child_scatters, child_hs_in_batch, tf.shape(child_hs_in_batch),
+                                                      name="child_batch_to_pairs")
 
                     # create sentence indices
-                    level_indice_begin, level_indice_end = tf.split(tf.slice(self.out_indices, prev_idx_var_dim1, [2]), 2)
+                    level_indice_begin, level_indice_end = tf.split(tf.slice(self.out_indices, prev_idx_var_dim1, [2]),
+                                                                    2)
                     level_indice_size = level_indice_end - level_indice_begin
                     tree_idx_in_batch = tf.slice(self.tree_idxs, level_indice_begin, level_indice_size)
-                    tree_idx_in_pairs = tf.scatter_nd(child_scatters, tree_idx_in_batch, tf.shape(tree_idx_in_batch), name="tree_idx_batch_to_pairs")
-
-                    idx_left = tf.gather(tree_idx_in_pairs, even_idx)
-                    idx_right = tf.gather(tree_idx_in_pairs, odd_idx)
-
-                    # extract the sentences for the level
-                    flat_src_l = tf.gather(flat_src_l, idx_left)
-                    flat_src_r = tf.gather(flat_src_r, idx_right)
+                    tree_idx_in_pairs = tf.scatter_nd(child_scatters, tree_idx_in_batch, tf.shape(tree_idx_in_batch),
+                                                      name="tree_idx_batch_to_pairs")
 
                     # create span indices
-                    # nbf = tf.Print(nbf, [self.span_idxs], "span_idxs")
                     zero_expanded = tf.expand_dims(tf.constant(0), axis=0)
                     two_expanded = tf.expand_dims(tf.constant(2), axis=0)
-                    span_in_batch = tf.slice(self.span_idxs, tf.concat([level_indice_begin, zero_expanded], axis=0), tf.concat([level_indice_size, two_expanded], axis=0))
-                    span_idx_in_pairs = tf.scatter_nd(child_scatters, span_in_batch, tf.shape(span_in_batch), name="span_idx_batch_to_pairs")
+                    span_in_batch = tf.slice(self.span_idxs, tf.concat([level_indice_begin, zero_expanded], axis=0),
+                                             tf.concat([level_indice_size, two_expanded], axis=0))
+                    span_idx_in_pairs = tf.scatter_nd(child_scatters, span_in_batch, tf.shape(span_in_batch),
+                                                      name="span_idx_batch_to_pairs")
 
-                    if span_scheme == 'PARENT':
-                        print("Attending span under parent")
-                        span_left = tf.gather(span_idx_in_pairs, even_idx)
-                        span_right = tf.gather(span_idx_in_pairs, odd_idx)
+                    res_l, res_r = self.attention_module.compute(children_in_pairs,
+                                                                 span_idx_in_pairs,
+                                                                 tree_idx_in_pairs,
+                                                                 flat_src_l, flat_src_r,
+                                                                 batch_sentence_lengths=self.lengths,
+                                                                 dropout=self.dropout)
 
-                        span_left_left = tf.expand_dims(span_left[:, 0], axis=-1)
-                        span_right_right = tf.expand_dims(span_right[:, 1], axis=-1)
-
-                        parent_span = tf.concat([span_left_left, span_right_right], axis=-1)
-
-                        span_left = parent_span
-                        span_right = parent_span
-
-                    elif span_scheme == 'SIBLING':
-                        print("Attending span of sibling")
-                        span_left = tf.gather(span_idx_in_pairs, even_idx)
-                        span_right = tf.gather(span_idx_in_pairs, odd_idx)
-
-                    elif span_scheme == 'ALL':
-                        print("Attending the whole sentence")
-                        sentence_len = tf.gather(self.lengths, idx_left)
-                        length_inclusive = tf.expand_dims(sentence_len - 1, axis=1)
-
-                        sentence_span = tf.pad(length_inclusive, tf.constant([[0, 0], [1, 0]]), 'CONSTANT')
-                        span_left = sentence_span
-                        span_right = sentence_span
-                    else:
-                        raise Exception("Unknown span scheme")
-
-                    # compute ctx and attn
-                    ctx_left, attn_weights_l = compute(child_h_left, flat_src_l, span_right, is_left=True)
-                    ctx_right, attn_weights_r = compute(child_h_right, flat_src_r, span_left, is_left=False)
+                    (ctx_left, attn_weights_l), (ctx_right, attn_weights_r) = res_l, res_r
 
                     # combine context and put in input format, pre-padding size of original embedding dim
                     ctx_overall = tf.concat([ctx_left, ctx_right], axis=-1)
@@ -410,13 +294,8 @@ class NarytreeLSTM(object):
                     raise Exception("Unknown attention place")
 
                 attn_ctx, attn_weights = tf.cond(attention_cond,
-                                                 lambda: compute_attn_ctx(attn_bw, attn_fw, self.config.span_scheme, self.config.matching_scheme),
+                                                 lambda: compute_attn_ctx(attn_bw, attn_fw),
                                                  lambda: (const0f, tf.zeros((1, max_sentence_len))))
-
-
-
-
-                # out_ = tf.Print(out_, [attn_weights, tf.shape(attn_weights)], "attn weights")
 
                 if self.config.attn_place != 'NONE':
                     out_ += attn_ctx
@@ -447,11 +326,12 @@ class NarytreeLSTM(object):
                 idx_var = tf.add(idx_var, 1)
 
                 return nodes_h, nodes_c, nodes_h_scattered, idx_var, attn_arr
+
             loop_cond = lambda x, y, z, id, attn: tf.less(id, self.tree_height)
 
             loop_vars = [nodes_h, nodes_c, nodes_h_scattered, idx_var, attn_arr]
             nodes_h, nodes_c, nodes_h_scattered, idx_var, attn_arr = tf.while_loop(loop_cond, _recurrence, loop_vars,
-                                                              parallel_iterations=1)
+                                                                                   parallel_iterations=1)
 
             if self.config.attn_place != 'NONE':
                 self.attention = attn_arr.concat()
@@ -517,26 +397,150 @@ def build_mlp(
         return tf.layers.dense(inputs=prev_layer, units=output_size, activation=output_activation)
 
 
-def atrous_conv1d(text, text_dim, output_dim, filter_width, dilation, scope):
+class AttentionModule(object):
 
-    """
-    Reference from https://medium.com/@TalPerry/convolutional-methods-for-text-d5260fd5675f
-    :param text: A tensor of embedded tokens with shape [batch_size,max_length,embedding_size]
-    :param text_dim: The number of feature maps we'd like to calculate
-    :param filter_width: filter width
-    :param dilation: dilation rate
-    :return: A tensor of the concolved input with shape [batch_size,max_length,output_size]
-    """
+    def __init__(self, hidden_dim, matching_scheme, span_scheme):
+        self.hidden_dim = hidden_dim
+        self.matching_scheme = matching_scheme
+        self.span_scheme = span_scheme
 
-    with tf.variable_scope(scope, reuse=tf.AUTO_REUSE):
+    def _split_left_right(self,
+                          children_in_pairs,
+                          span_idx_in_pairs,
+                          tree_idx_in_pairs,
+                          flat_src_l, flat_src_r,
+                          batch_sentence_lengths):
 
-        text = tf.expand_dims(text, axis=1)
-        shape = [1, filter_width, text_dim, output_dim]
-        filter_var = tf.get_variable("conv_filter", shape=shape)
+        # create index to extract left and right children
+        idx_range = tf.range(tf.shape(children_in_pairs)[0])
+        even_odd_idx = tf.transpose(tf.reshape(idx_range, [-1, 2]))
+        even_idx = even_odd_idx[0]
+        odd_idx = even_odd_idx[1]
+        child_l = tf.gather(children_in_pairs, even_idx)
+        child_r = tf.gather(children_in_pairs, odd_idx)
 
-        convolved = tf.nn.atrous_conv2d(text, filters=filter_var, rate=dilation, padding="SAME")
-        result = tf.squeeze(convolved, axis=1)
-        return result
+        # extract the sentences for the level
+        idx_left = tf.gather(tree_idx_in_pairs, even_idx)
+        idx_right = tf.gather(tree_idx_in_pairs, odd_idx)
+        flat_src_l = tf.gather(flat_src_l, idx_left)
+        flat_src_r = tf.gather(flat_src_r, idx_right)
+
+        if self.span_scheme == 'PARENT':
+            print("Using parent span ..")
+            span_left = tf.gather(span_idx_in_pairs, even_idx)
+            span_right = tf.gather(span_idx_in_pairs, odd_idx)
+
+            span_left_left = tf.expand_dims(span_left[:, 0], axis=-1)
+            span_right_right = tf.expand_dims(span_right[:, 1], axis=-1)
+
+            parent_span = tf.concat([span_left_left, span_right_right], axis=-1)
+
+            span_left = parent_span
+            span_right = parent_span
+
+        elif self.span_scheme == 'SIBLING':
+            print("Using sibling span ..")
+            span_left = tf.gather(span_idx_in_pairs, even_idx)
+            span_right = tf.gather(span_idx_in_pairs, odd_idx)
+
+        elif self.span_scheme == 'ALL':
+            print("Using whole sentence span ..")
+            sentence_len = tf.gather(batch_sentence_lengths, idx_left)
+            length_inclusive = tf.expand_dims(sentence_len - 1, axis=1)
+
+            sentence_span = tf.pad(length_inclusive, tf.constant([[0, 0], [1, 0]]), 'CONSTANT')
+            span_left = sentence_span
+            span_right = sentence_span
+        else:
+            raise Exception("Unknown span scheme")
+
+        return (child_l, child_r), (span_left, span_right), (flat_src_l, flat_src_r)
+
+    def compute(self,
+                children_in_pairs,
+                span_idx_in_pairs,
+                tree_idx_in_pairs,
+                full_flat_src_l, full_flat_src_r,
+                batch_sentence_lengths,
+                dropout):
+
+        (child_l, child_r), (span_left, span_right), (flat_src_l, flat_src_r) = self._split_left_right(
+            children_in_pairs,
+            span_idx_in_pairs,
+            tree_idx_in_pairs,
+            full_flat_src_l, full_flat_src_r,
+            batch_sentence_lengths)
+
+        # left child attending right span and vice versa
+        (ctx_l, attn_ws_l) = self._compute_attentional_contexts(child_l, flat_src_l, span_right, is_left=True, dropout=dropout)
+        (ctx_r, attn_ws_r) = self._compute_attentional_contexts(child_r, flat_src_r, span_left, is_left=False, dropout=dropout)
+
+        return (ctx_l, attn_ws_l), (ctx_r, attn_ws_r)
+
+    def _compute_attentional_contexts(self, h_child, flat_src, span, is_left, dropout):
+        """
+        Compute context and attention weights. Note that flat source here needs not be unique, because hidden state of child at the same level can come from the same tree.
+        :param h_child: hidden child state in batch [num_child, hidden_dim]
+        :param flat_src: flat sentence source where the order does correspond with the order of h_child
+        :param span: start and begin of each sub-sentence of the flat source
+        :param is_left: whether compute attention of left child
+        :return: context and attention weights
+        """
+
+        scope = "attn_left" if is_left else "attn_right"
+
+        with tf.variable_scope(scope, reuse=tf.AUTO_REUSE):
+
+            h_child = tf.nn.dropout(h_child, dropout)
+            flat_src = tf.nn.dropout(flat_src, dropout)
+
+            h_child = tf.reshape(h_child, [-1, self.hidden_dim])
+            h_child = tf.expand_dims(h_child, axis=1)
+
+            if is_left:
+                flat_src = tf.layers.dense(flat_src, self.hidden_dim, name="attn_src_proj_left",
+                                           reuse=tf.AUTO_REUSE)
+            else:
+                flat_src = tf.layers.dense(flat_src, self.hidden_dim, name="attn_src_proj_right",
+                                           reuse=tf.AUTO_REUSE)
+
+            if self.matching_scheme == 'DOT_PROD':
+                print("Using dot product for matching score...")
+                matching_score = tf.reduce_sum(h_child * flat_src, axis=-1)
+            elif self.matching_scheme == 'ADDITIVE':
+                print("Using additive for matching score...")
+                h_child = tf.layers.dense(h_child,
+                                          self.config.hidden_dim,
+                                          name="attn_child_proj",
+                                          reuse=tf.AUTO_REUSE, use_bias=False)
+                matching_score = tf.nn.dropout(tf.nn.relu(h_child + flat_src), dropout)
+                matching_score = tf.squeeze(tf.layers.dense(matching_score, 1, name="attn_score", reuse=tf.AUTO_REUSE),
+                                            axis=-1)
+            elif self.matching_scheme == 'MLP':
+                print("Building mlp for matching score...")
+                h_child = tf.tile(h_child, [1, tf.shape(flat_src)[1], 1])
+                matching_score = build_mlp(
+                    input=tf.concat([h_child, flat_src], axis=-1),
+                    output_size=1,
+                    drop_out=1,
+                    scope="matching_mlp",
+                    n_layers=2,
+                    sizes=[4, 4],
+                    output_activation=tf.nn.relu)
+                matching_score = tf.squeeze(matching_score, axis=-1)
+            else:
+                raise Exception("Matching func {} is not known".format(self.matching_scheme))
+
+            attn_ws = restricted_softmax_on_sequence_range(matching_score, tf.shape(matching_score)[1], span)
+            context = tf.reduce_sum(flat_src * tf.expand_dims(attn_ws, axis=-1), axis=1)
+
+            # scaling adjusting for different size
+            span_size = (span[:, 1] - span[:, 0]) + 1
+            span_size_dim = tf.cast(tf.expand_dims(span_size, axis=1), dtype=tf.float32)
+            context = context * (span_size_dim / 40)
+
+            return context, attn_ws
+
 
 class SoftMaxNarytreeLSTM(object):
 
@@ -579,7 +583,6 @@ class SoftMaxNarytreeLSTM(object):
         roots_h = nodes_h.read(nodes_h.size()-1)
         out = tf.matmul(roots_h, self.W) + self.b
         return out
-
 
     def get_output(self):
         return self.output
